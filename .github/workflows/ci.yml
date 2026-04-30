@@ -91,7 +91,7 @@ jobs:
       - name: Create sidecar stub for Rust tests
         run: |
           TRIPLE=$(rustc -vV | grep host | cut -d' ' -f2)
-          mkdir -p src-tauri/binaries
+          mkdir -p src-tauri/binaries/_internal
           EXT=""
           if [[ "$TRIPLE" == *windows* ]]; then EXT=".exe"; fi
           touch "src-tauri/binaries/clarity-server-${TRIPLE}${EXT}"
