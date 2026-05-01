@@ -91,12 +91,44 @@ def _cmd_doctor(_args: argparse.Namespace) -> None:
 
 
 def _cmd_install(args: argparse.Namespace) -> None:
-    from clarity_agent.setup.desktop import _cli_main as desktop_install
+    """Run the CLI install, the desktop build, or both.
 
-    argv: list[str] = []
-    if args.release:
-        argv.append("--release")
-    desktop_install(argv, source_dir=_SCRIPT_DIR.resolve())
+    Each phase delegates to its own ``_cli_main`` so behavior matches
+    invoking the underlying tools directly (color output, auth prompt,
+    final messaging).  Phases run in order — CLI first, then desktop —
+    because the desktop build's ``_ensure_build_deps`` step pip-installs
+    into the venv that the CLI install creates.
+
+    Either phase raising ``SystemExit(non-zero)`` propagates out and
+    short-circuits the rest, so a failed CLI install never wastes time
+    on an unbuildable desktop app.
+    """
+    source_dir = _SCRIPT_DIR.resolve()
+    do_cli = args.mode in ("all", "cli")
+    do_desktop = args.mode in ("all", "desktop")
+
+    if do_cli:
+        from clarity_agent.setup.installer import _cli_main as cli_install
+
+        if do_desktop:
+            print("\n=== Phase 1 of 2: CLI install ===\n")
+        cli_argv: list[str] = [
+            "--mode", "standalone",
+            "--target", str(source_dir),
+        ]
+        if args.skip_tests:
+            cli_argv.append("--skip-tests")
+        cli_install(cli_argv)
+
+    if do_desktop:
+        from clarity_agent.setup.desktop import _cli_main as desktop_install
+
+        if do_cli:
+            print("\n=== Phase 2 of 2: desktop app build ===\n")
+        desktop_argv: list[str] = []
+        if args.release:
+            desktop_argv.append("--release")
+        desktop_install(desktop_argv, source_dir=source_dir)
 
 
 def _cmd_embed(args: argparse.Namespace) -> None:
@@ -494,12 +526,41 @@ def main() -> None:
     # ---- clarity install --------------------------------------------------
     install_parser = subparsers.add_parser(
         "install",
-        help="Install Clarity as a desktop application",
+        help="Install Clarity (CLI tooling and/or the desktop app)",
+        description=(
+            "Install the Clarity CLI tooling, the desktop app, or both.  "
+            "Default mode 'all' runs the CLI install first (creates a "
+            "venv, pip-installs runtime deps, sets up .env, drops a "
+            "`clarity` shim on PATH) and then builds the desktop app "
+            "(PyInstaller sidecar + Tauri .app/.dmg/.msi/.deb).  Use "
+            "--mode to install just one component."
+        ),
+    )
+    install_parser.add_argument(
+        "--mode",
+        choices=["all", "cli", "desktop"],
+        default="all",
+        help=(
+            "Which components to install.  'all' (default) does both; "
+            "'cli' only sets up the CLI install (venv + shim + .env); "
+            "'desktop' only builds the native app."
+        ),
     )
     install_parser.add_argument(
         "--release",
         action="store_true",
-        help="Produce an optimized release build (default: debug)",
+        help=(
+            "Produce an optimized release build of the desktop app "
+            "(default: debug).  Ignored in --mode cli."
+        ),
+    )
+    install_parser.add_argument(
+        "--skip-tests",
+        action="store_true",
+        help=(
+            "Skip the test run that the CLI install performs in dev "
+            "mode.  Ignored in --mode desktop."
+        ),
     )
 
     # ---- clarity embed ----------------------------------------------------
