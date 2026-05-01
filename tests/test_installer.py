@@ -337,28 +337,47 @@ class TestInstallPythonDeps:
         venv = tmp_path / ".venv"
         cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with patch("clarity_agent.setup.installer.subprocess.run", return_value=cp):
-            r = install_python_deps(tmp_path, venv, ".[dev]")
-        assert r.outcome == Outcome.OK
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+        assert all(r.outcome == Outcome.OK for r in results)
 
-    def test_pip_upgrade_fail(self, tmp_path: Path) -> None:
+    def test_pip_upgrade_fail_is_warn_not_fail(self, tmp_path: Path) -> None:
+        """Pip-upgrade failures don't block the install — venv's bundled
+        pip is usually fine.  Reported as WARN so the operator sees the
+        captured stderr but the dependency install still proceeds.
+        """
         venv = tmp_path / ".venv"
-        cp = subprocess.CompletedProcess([], 1, stdout="", stderr="err")
-        with patch("clarity_agent.setup.installer.subprocess.run", return_value=cp):
-            r = install_python_deps(tmp_path, venv, ".[dev]")
-        assert r.outcome == Outcome.FAIL
-        assert "pip upgrade" in r.message
+        upgrade_fail = subprocess.CompletedProcess([], 1, stdout="", stderr="err")
+        install_ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch(
+            "clarity_agent.setup.installer.subprocess.run",
+            side_effect=[upgrade_fail, install_ok],
+        ):
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+        # Two results: the WARN upgrade + the OK install.
+        assert len(results) == 2
+        assert results[0].outcome == Outcome.WARN
+        assert "pip upgrade" in results[0].message
+        # Captured stderr propagates into the message so the operator
+        # can diagnose without reproducing.
+        assert "err" in results[0].message
+        assert results[1].outcome == Outcome.OK
 
     def test_pip_install_fail(self, tmp_path: Path) -> None:
-        """pip upgrade succeeds but pip install fails."""
+        """pip upgrade succeeds but pip install fails — overall FAIL."""
         venv = tmp_path / ".venv"
         ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        fail = subprocess.CompletedProcess([], 1, stdout="", stderr="err")
+        fail = subprocess.CompletedProcess(
+            [], 1, stdout="", stderr="ResolutionImpossible: ...",
+        )
         with patch(
             "clarity_agent.setup.installer.subprocess.run", side_effect=[ok, fail]
         ):
-            r = install_python_deps(tmp_path, venv, ".[dev]")
-        assert r.outcome == Outcome.FAIL
-        assert "pip install" in r.message
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+        assert any(r.outcome == Outcome.FAIL for r in results)
+        fail_result = next(r for r in results if r.outcome == Outcome.FAIL)
+        assert "pip install" in fail_result.message
+        # Captured stderr propagates so the operator sees the real reason.
+        assert "ResolutionImpossible" in fail_result.message
 
 
 # ---------------------------------------------------------------------------

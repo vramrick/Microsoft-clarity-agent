@@ -37,6 +37,27 @@ def _venv_python(venv_dir: Path) -> str:
     return str(venv_dir / "bin" / "python")
 
 
+def _subprocess_failure(
+    label: str, result: subprocess.CompletedProcess[str],
+) -> str:
+    """Build a multi-line failure message that includes captured output.
+
+    The default ``"X failed"`` message is useless when the install
+    breaks — the operator has nothing to grep, no stack to follow.
+    Including the last lines of stderr (preferred) or stdout makes
+    failures self-diagnosing.  Uses last ~12 lines so a long npm
+    error doesn't bury the actual exit reason.
+    """
+    tail_lines = 12
+    body = (result.stderr or "").strip() or (result.stdout or "").strip()
+    if body:
+        lines = body.splitlines()
+        if len(lines) > tail_lines:
+            body = "\n".join(["...(earlier output omitted)"] + lines[-tail_lines:])
+        return f"{label} (exit {result.returncode}):\n{body}"
+    return f"{label} (exit {result.returncode}, no output captured)"
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -290,7 +311,7 @@ def clone_or_update(target: Path, clone_url: str) -> StepResult:
         capture_output=True, text=True, timeout=120,
     )
     if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "git clone failed")
+        return StepResult(Outcome.FAIL, _subprocess_failure("git clone", r))
     return StepResult(Outcome.OK, f"Cloned clarity agent into {CLARITY_DIR}")
 
 
@@ -339,7 +360,9 @@ def create_venv(venv_dir: Path) -> StepResult:
         capture_output=True, text=True, timeout=60,
     )
     if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "Failed to create virtual environment")
+        return StepResult(
+            Outcome.FAIL, _subprocess_failure("venv creation", r),
+        )
     return StepResult(Outcome.OK, f"Created {venv_dir.name}")
 
 
@@ -347,24 +370,49 @@ def install_python_deps(
     cwd: Path,
     venv_dir: Path,
     pip_spec: str,
-) -> StepResult:
-    """Install Python dependencies via pip."""
-    venv_python = _venv_python(venv_dir)
+) -> list[StepResult]:
+    """Install Python dependencies via pip.
 
-    r = subprocess.run(
+    Returns a list of :class:`StepResult` because the optional pip
+    upgrade is reported separately from the actual dependency install
+    — the upgrade is a nice-to-have (modern venvs ship a recent
+    enough pip), so its failure becomes a WARN rather than blocking
+    the dependency install that follows.  If that next install hits
+    a problem the bundled pip really can't handle, its own error
+    message will say so.
+    """
+    venv_python = _venv_python(venv_dir)
+    results: list[StepResult] = []
+
+    upgrade = subprocess.run(
         [venv_python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
         capture_output=True, text=True, timeout=120,
     )
-    if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "pip upgrade failed")
+    if upgrade.returncode != 0:
+        # WARN, not FAIL — the venv's bundled pip is usually fine.
+        # Most common cause is a uv-managed Python that lacks pip
+        # entirely ("No module named pip"), in which case the next
+        # step will fail with a clear message of its own anyway.
+        results.append(StepResult(
+            Outcome.WARN,
+            _subprocess_failure(
+                "pip upgrade skipped (continuing with bundled pip)", upgrade,
+            ),
+        ))
+    else:
+        results.append(StepResult(Outcome.OK, "pip upgraded"))
 
-    r = subprocess.run(
+    install = subprocess.run(
         [venv_python, "-m", "pip", "install", "-e", pip_spec],
         cwd=cwd, capture_output=True, text=True, timeout=300,
     )
-    if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "pip install failed")
-    return StepResult(Outcome.OK, "Python dependencies installed")
+    if install.returncode != 0:
+        results.append(StepResult(
+            Outcome.FAIL, _subprocess_failure("pip install", install),
+        ))
+    else:
+        results.append(StepResult(Outcome.OK, "Python dependencies installed"))
+    return results
 
 
 def build_web_frontend(web_dir: Path) -> StepResult:
@@ -386,7 +434,7 @@ def build_web_frontend(web_dir: Path) -> StepResult:
             Outcome.WARN, "npm not found — skipping web frontend build",
         )
     if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "npm install failed")
+        return StepResult(Outcome.FAIL, _subprocess_failure("npm install", r))
 
     try:
         r = subprocess.run(
@@ -398,7 +446,7 @@ def build_web_frontend(web_dir: Path) -> StepResult:
             Outcome.WARN, "npm not found — skipping web frontend build",
         )
     if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "npm run build failed")
+        return StepResult(Outcome.FAIL, _subprocess_failure("npm run build", r))
     return StepResult(Outcome.OK, "Web frontend built")
 
 
@@ -551,7 +599,9 @@ def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
         cwd=target, capture_output=True, text=True, timeout=300,
     )
     if r.returncode != 0:
-        results.append(StepResult(Outcome.FAIL, "Python tests failed"))
+        results.append(StepResult(
+            Outcome.FAIL, _subprocess_failure("Python tests", r),
+        ))
     else:
         results.append(StepResult(Outcome.OK, "Python tests passed"))
 
@@ -562,7 +612,9 @@ def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
             cwd=web_dir, capture_output=True, text=True, timeout=300,
         )
         if r.returncode != 0:
-            results.append(StepResult(Outcome.FAIL, "Frontend tests failed"))
+            results.append(StepResult(
+                Outcome.FAIL, _subprocess_failure("Frontend tests", r),
+            ))
         else:
             results.append(StepResult(Outcome.OK, "Frontend tests passed"))
 
@@ -651,9 +703,11 @@ def run_install(
         return results
 
     # -- Pip install -----------------------------------------------------
-    r = install_python_deps(config.pip_cwd, config.venv_dir, config.pip_install_spec)
-    _record(r)
-    if r.outcome == Outcome.FAIL:
+    pip_results = install_python_deps(
+        config.pip_cwd, config.venv_dir, config.pip_install_spec,
+    )
+    _record_all(pip_results)
+    if any(r.outcome == Outcome.FAIL for r in pip_results):
         return results
 
     # -- Web frontend ----------------------------------------------------
