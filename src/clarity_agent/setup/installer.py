@@ -37,6 +37,27 @@ def _venv_python(venv_dir: Path) -> str:
     return str(venv_dir / "bin" / "python")
 
 
+def _subprocess_failure(
+    label: str, result: subprocess.CompletedProcess[str],
+) -> str:
+    """Build a multi-line failure message that includes captured output.
+
+    The default ``"X failed"`` message is useless when the install
+    breaks — the operator has nothing to grep, no stack to follow.
+    Including the last lines of stderr (preferred) or stdout makes
+    failures self-diagnosing.  Uses last ~12 lines so a long npm
+    error doesn't bury the actual exit reason.
+    """
+    tail_lines = 12
+    body = (result.stderr or "").strip() or (result.stdout or "").strip()
+    if body:
+        lines = body.splitlines()
+        if len(lines) > tail_lines:
+            body = "\n".join(["...(earlier output omitted)"] + lines[-tail_lines:])
+        return f"{label} (exit {result.returncode}):\n{body}"
+    return f"{label} (exit {result.returncode}, no output captured)"
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -290,7 +311,7 @@ def clone_or_update(target: Path, clone_url: str) -> StepResult:
         capture_output=True, text=True, timeout=120,
     )
     if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "git clone failed")
+        return StepResult(Outcome.FAIL, _subprocess_failure("git clone", r))
     return StepResult(Outcome.OK, f"Cloned clarity agent into {CLARITY_DIR}")
 
 
@@ -339,7 +360,9 @@ def create_venv(venv_dir: Path) -> StepResult:
         capture_output=True, text=True, timeout=60,
     )
     if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "Failed to create virtual environment")
+        return StepResult(
+            Outcome.FAIL, _subprocess_failure("venv creation", r),
+        )
     return StepResult(Outcome.OK, f"Created {venv_dir.name}")
 
 
@@ -347,28 +370,86 @@ def install_python_deps(
     cwd: Path,
     venv_dir: Path,
     pip_spec: str,
-) -> StepResult:
-    """Install Python dependencies via pip."""
+) -> list[StepResult]:
+    """Install Python dependencies into *venv_dir*.
+
+    Picks an installer based on what's available, in this order:
+
+    1. ``uv pip install --python <venv-python> -e <spec>`` when ``uv``
+       is on ``$PATH``.  Required when the venv was created by
+       ``uv run`` — uv-made venvs ship without pip by default, so
+       ``python -m pip`` would fail with "No module named pip."  When
+       uv is in play, the explicit "upgrade pip" step is skipped: uv
+       has its own resolver and doesn't depend on pip's version.
+    2. ``<venv-python> -m pip install -e <spec>`` otherwise.  The
+       upgrade-pip step still runs but its failure is now a WARN, not
+       a FAIL — the venv's bundled pip is usually fine, and the
+       dependency install that follows reports a real error if not.
+
+    Returns a list of :class:`StepResult` so each phase (upgrade /
+    install) can be reported separately rather than collapsed into a
+    single misleading message.
+    """
     venv_python = _venv_python(venv_dir)
+    results: list[StepResult] = []
+    use_uv = shutil.which("uv") is not None
 
-    r = subprocess.run(
-        [venv_python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
-        capture_output=True, text=True, timeout=120,
-    )
-    if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "pip upgrade failed")
+    if use_uv:
+        # uv handles its own resolver; no pip upgrade needed (and
+        # would fail anyway on uv venvs that don't ship pip).
+        results.append(StepResult(
+            Outcome.SKIP,
+            "pip upgrade skipped (using uv pip; not applicable)",
+        ))
+    else:
+        upgrade = subprocess.run(
+            [venv_python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if upgrade.returncode != 0:
+            # WARN, not FAIL — bundled pip is usually fine.
+            results.append(StepResult(
+                Outcome.WARN,
+                _subprocess_failure(
+                    "pip upgrade skipped (continuing with bundled pip)",
+                    upgrade,
+                ),
+            ))
+        else:
+            results.append(StepResult(Outcome.OK, "pip upgraded"))
 
-    r = subprocess.run(
-        [venv_python, "-m", "pip", "install", "-e", pip_spec],
-        cwd=cwd, capture_output=True, text=True, timeout=300,
+    if use_uv:
+        install_cmd = [
+            "uv", "pip", "install",
+            "--python", venv_python,
+            "-e", pip_spec,
+        ]
+        installer_label = "uv pip install"
+    else:
+        install_cmd = [venv_python, "-m", "pip", "install", "-e", pip_spec]
+        installer_label = "pip install"
+    install = subprocess.run(
+        install_cmd, cwd=cwd, capture_output=True, text=True, timeout=300,
     )
-    if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "pip install failed")
-    return StepResult(Outcome.OK, "Python dependencies installed")
+    if install.returncode != 0:
+        results.append(StepResult(
+            Outcome.FAIL, _subprocess_failure(installer_label, install),
+        ))
+    else:
+        results.append(StepResult(Outcome.OK, "Python dependencies installed"))
+    return results
 
 
 def build_web_frontend(web_dir: Path) -> StepResult:
-    """Run npm install + build in the given web directory."""
+    """Run npm install + build in the given web directory.
+
+    On Windows, ``npm`` ships as ``npm.cmd``; ``subprocess.run(["npm",
+    ...])`` without ``shell=True`` calls ``CreateProcess`` directly,
+    which only resolves ``.exe`` — so the bare-list call raises
+    ``FileNotFoundError`` even when ``shutil.which("npm")`` succeeded
+    (since ``shutil.which`` honors ``PATHEXT``).  Pass ``shell=True``
+    on Windows so ``cmd.exe`` resolves the ``.cmd`` shim.
+    """
     if not (web_dir / "package.json").exists():
         return StepResult(Outcome.SKIP, "web/package.json not found")
     if not shutil.which("npm"):
@@ -380,25 +461,27 @@ def build_web_frontend(web_dir: Path) -> StepResult:
         r = subprocess.run(
             ["npm", "install"], cwd=web_dir,
             capture_output=True, text=True, timeout=120,
+            shell=_IS_WINDOWS,
         )
     except FileNotFoundError:
         return StepResult(
             Outcome.WARN, "npm not found — skipping web frontend build",
         )
     if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "npm install failed")
+        return StepResult(Outcome.FAIL, _subprocess_failure("npm install", r))
 
     try:
         r = subprocess.run(
             ["npm", "run", "build"], cwd=web_dir,
             capture_output=True, text=True, timeout=120,
+            shell=_IS_WINDOWS,
         )
     except FileNotFoundError:
         return StepResult(
             Outcome.WARN, "npm not found — skipping web frontend build",
         )
     if r.returncode != 0:
-        return StepResult(Outcome.FAIL, "npm run build failed")
+        return StepResult(Outcome.FAIL, _subprocess_failure("npm run build", r))
     return StepResult(Outcome.OK, "Web frontend built")
 
 
@@ -542,29 +625,56 @@ def insert_agent_snippet(target: Path, agent_dir: Path) -> StepResult:
 
 
 def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
-    """Run pytest and vitest.  Only used in dev mode."""
+    """Run pytest and vitest.  Only used in dev mode.
+
+    Both subprocess calls are wrapped in ``FileNotFoundError`` handlers
+    so a missing interpreter (broken venv) or missing ``npx`` shim
+    surfaces as a FAIL StepResult instead of crashing the whole
+    install with an unhandled ``WinError 2`` / ``ENOENT``.  The npx
+    call also passes ``shell=True`` on Windows — same reason as
+    :func:`build_web_frontend` (bare ``CreateProcess`` won't resolve
+    ``npx.cmd``).
+    """
     results: list[StepResult] = []
     venv_python = _venv_python(venv_dir)
 
-    r = subprocess.run(
-        [venv_python, "-m", "pytest", "tests/", "-x", "-q"],
-        cwd=target, capture_output=True, text=True, timeout=300,
-    )
-    if r.returncode != 0:
-        results.append(StepResult(Outcome.FAIL, "Python tests failed"))
+    try:
+        r = subprocess.run(
+            [venv_python, "-m", "pytest", "tests/", "-x", "-q"],
+            cwd=target, capture_output=True, text=True, timeout=300,
+        )
+    except FileNotFoundError as exc:
+        results.append(StepResult(
+            Outcome.FAIL, f"Python tests: interpreter not found ({exc})",
+        ))
     else:
-        results.append(StepResult(Outcome.OK, "Python tests passed"))
+        if r.returncode != 0:
+            results.append(StepResult(
+                Outcome.FAIL, _subprocess_failure("Python tests", r),
+            ))
+        else:
+            results.append(StepResult(Outcome.OK, "Python tests passed"))
 
     web_dir = target / "web"
     if (web_dir / "package.json").exists():
-        r = subprocess.run(
-            ["npx", "vitest", "run"],
-            cwd=web_dir, capture_output=True, text=True, timeout=300,
-        )
-        if r.returncode != 0:
-            results.append(StepResult(Outcome.FAIL, "Frontend tests failed"))
+        try:
+            r = subprocess.run(
+                ["npx", "vitest", "run"],
+                cwd=web_dir, capture_output=True, text=True, timeout=300,
+                shell=_IS_WINDOWS,
+            )
+        except FileNotFoundError:
+            results.append(StepResult(
+                Outcome.WARN,
+                "npx not found — skipping frontend tests",
+            ))
         else:
-            results.append(StepResult(Outcome.OK, "Frontend tests passed"))
+            if r.returncode != 0:
+                results.append(StepResult(
+                    Outcome.FAIL, _subprocess_failure("Frontend tests", r),
+                ))
+            else:
+                results.append(StepResult(Outcome.OK, "Frontend tests passed"))
 
     return results
 
@@ -651,9 +761,11 @@ def run_install(
         return results
 
     # -- Pip install -----------------------------------------------------
-    r = install_python_deps(config.pip_cwd, config.venv_dir, config.pip_install_spec)
-    _record(r)
-    if r.outcome == Outcome.FAIL:
+    pip_results = install_python_deps(
+        config.pip_cwd, config.venv_dir, config.pip_install_spec,
+    )
+    _record_all(pip_results)
+    if any(r.outcome == Outcome.FAIL for r in pip_results):
         return results
 
     # -- Web frontend ----------------------------------------------------
@@ -738,7 +850,14 @@ def _cli_main(argv: Sequence[str] | None = None) -> None:
     # -- Auth check & interactive prompt ---------------------------------
     claude_available, claude_logged_in = check_claude_auth()
 
-    if not claude_logged_in:
+    # Skip the interactive auth prompt in CI or when stdin is not a TTY
+    # (e.g. piped input).  The .env file will still be created from
+    # .env.sample by setup_env_file if auth is not configured.
+    # Use an explicit check so that CI=false / CI=0 is treated as non-CI.
+    _in_ci = os.environ.get("CI", "").lower() in ("1", "true", "yes")
+    _interactive = not _in_ci and sys.stdin.isatty()
+
+    if not claude_logged_in and _interactive:
         print()
         if claude_available:
             info("Claude CLI detected but not logged in")

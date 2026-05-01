@@ -333,32 +333,107 @@ class TestCreateVenv:
 # ---------------------------------------------------------------------------
 
 class TestInstallPythonDeps:
-    def test_ok(self, tmp_path: Path) -> None:
+    def test_ok_with_pip_path(self, tmp_path: Path) -> None:
+        """Without uv on PATH, both pip upgrade and pip install run."""
         venv = tmp_path / ".venv"
         cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        with patch("clarity_agent.setup.installer.subprocess.run", return_value=cp):
-            r = install_python_deps(tmp_path, venv, ".[dev]")
-        assert r.outcome == Outcome.OK
+        with patch(
+            "clarity_agent.setup.installer.shutil.which", return_value=None,
+        ), patch(
+            "clarity_agent.setup.installer.subprocess.run", return_value=cp,
+        ):
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+        assert len(results) == 2
+        assert results[0].outcome == Outcome.OK  # pip upgrade
+        assert results[1].outcome == Outcome.OK  # pip install
 
-    def test_pip_upgrade_fail(self, tmp_path: Path) -> None:
+    def test_pip_upgrade_fail_is_warn_not_fail(self, tmp_path: Path) -> None:
+        """Pip-upgrade failures don't block the install — venv's bundled
+        pip is usually fine.  Reported as WARN so the operator sees the
+        captured stderr but the dependency install still proceeds.
+        """
         venv = tmp_path / ".venv"
-        cp = subprocess.CompletedProcess([], 1, stdout="", stderr="err")
-        with patch("clarity_agent.setup.installer.subprocess.run", return_value=cp):
-            r = install_python_deps(tmp_path, venv, ".[dev]")
-        assert r.outcome == Outcome.FAIL
-        assert "pip upgrade" in r.message
+        upgrade_fail = subprocess.CompletedProcess([], 1, stdout="", stderr="err")
+        install_ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch(
+            "clarity_agent.setup.installer.shutil.which", return_value=None,
+        ), patch(
+            "clarity_agent.setup.installer.subprocess.run",
+            side_effect=[upgrade_fail, install_ok],
+        ):
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+        # Two results: the WARN upgrade + the OK install.
+        assert len(results) == 2
+        assert results[0].outcome == Outcome.WARN
+        assert "pip upgrade" in results[0].message
+        # Captured stderr propagates into the message so the operator
+        # can diagnose without reproducing.
+        assert "err" in results[0].message
+        assert results[1].outcome == Outcome.OK
 
     def test_pip_install_fail(self, tmp_path: Path) -> None:
-        """pip upgrade succeeds but pip install fails."""
+        """pip upgrade succeeds but pip install fails — overall FAIL."""
         venv = tmp_path / ".venv"
         ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        fail = subprocess.CompletedProcess([], 1, stdout="", stderr="err")
+        fail = subprocess.CompletedProcess(
+            [], 1, stdout="", stderr="ResolutionImpossible: ...",
+        )
         with patch(
-            "clarity_agent.setup.installer.subprocess.run", side_effect=[ok, fail]
+            "clarity_agent.setup.installer.shutil.which", return_value=None,
+        ), patch(
+            "clarity_agent.setup.installer.subprocess.run", side_effect=[ok, fail],
         ):
-            r = install_python_deps(tmp_path, venv, ".[dev]")
-        assert r.outcome == Outcome.FAIL
-        assert "pip install" in r.message
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+        assert any(r.outcome == Outcome.FAIL for r in results)
+        fail_result = next(r for r in results if r.outcome == Outcome.FAIL)
+        assert "pip install" in fail_result.message
+        # Captured stderr propagates so the operator sees the real reason.
+        assert "ResolutionImpossible" in fail_result.message
+
+    def test_uses_uv_when_available(self, tmp_path: Path) -> None:
+        """When uv is on PATH, use ``uv pip install --python <venv>`` and
+        skip the pip-upgrade step entirely.  This is the path that fixes
+        the "No module named pip" failure on uv-managed venvs (which
+        ship without pip by default).
+        """
+        venv = tmp_path / ".venv"
+        ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch(
+            "clarity_agent.setup.installer.shutil.which", return_value="/usr/local/bin/uv",
+        ), patch(
+            "clarity_agent.setup.installer.subprocess.run", return_value=ok,
+        ) as run_mock:
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+
+        # Only one subprocess call was made (the install) — no upgrade.
+        assert run_mock.call_count == 1
+        cmd = run_mock.call_args.args[0]
+        assert cmd[:3] == ["uv", "pip", "install"]
+        assert "--python" in cmd
+        # The pip-upgrade phase still produces a result, but as SKIP
+        # (no command run, just an explanatory note).
+        assert len(results) == 2
+        assert results[0].outcome == Outcome.SKIP
+        assert results[1].outcome == Outcome.OK
+
+    def test_uv_install_failure_propagates_with_stderr(
+        self, tmp_path: Path,
+    ) -> None:
+        """A uv-install failure surfaces the captured stderr in the FAIL
+        message — same self-diagnosing behavior as the pip path."""
+        venv = tmp_path / ".venv"
+        fail = subprocess.CompletedProcess(
+            [], 1, stdout="", stderr="error: package not found",
+        )
+        with patch(
+            "clarity_agent.setup.installer.shutil.which", return_value="/usr/local/bin/uv",
+        ), patch(
+            "clarity_agent.setup.installer.subprocess.run", return_value=fail,
+        ):
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+        fail_result = next(r for r in results if r.outcome == Outcome.FAIL)
+        assert "uv pip install" in fail_result.message
+        assert "package not found" in fail_result.message
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +480,47 @@ class TestBuildWebFrontend:
             with patch("clarity_agent.setup.installer.subprocess.run", return_value=cp):
                 r = build_web_frontend(tmp_path)
         assert r.outcome == Outcome.OK
+
+    def test_passes_shell_true_on_windows(self, tmp_path: Path) -> None:
+        """On Windows, npm calls must use shell=True to resolve npm.cmd.
+
+        Bare ``CreateProcess`` with ``["npm", ...]`` won't find the
+        ``.cmd`` shim — Python's ``subprocess`` only resolves ``.exe``
+        unless ``shell=True`` routes the invocation through cmd.exe.
+        Regression test for the Windows ``[WinError 2]`` install
+        failure on the install-fix branch.
+        """
+        (tmp_path / "package.json").write_text("{}")
+        cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("clarity_agent.setup.installer._IS_WINDOWS", True), \
+             patch("clarity_agent.setup.installer.shutil.which", return_value="C:\\npm.cmd"), \
+             patch(
+                 "clarity_agent.setup.installer.subprocess.run", return_value=cp,
+             ) as mock_run:
+            build_web_frontend(tmp_path)
+        # Both npm install and npm run build must pass shell=True.
+        assert mock_run.call_count == 2
+        for call in mock_run.call_args_list:
+            assert call.kwargs.get("shell") is True, (
+                f"npm subprocess on Windows must pass shell=True, got {call.kwargs}"
+            )
+
+    def test_no_shell_on_non_windows(self, tmp_path: Path) -> None:
+        """Inverse: on Mac/Linux, shell=True would be wrong — without
+        shell, the args list is execed directly, which is the safe
+        and idiomatic path on POSIX."""
+        (tmp_path / "package.json").write_text("{}")
+        cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("clarity_agent.setup.installer._IS_WINDOWS", False), \
+             patch("clarity_agent.setup.installer.shutil.which", return_value="/usr/bin/npm"), \
+             patch(
+                 "clarity_agent.setup.installer.subprocess.run", return_value=cp,
+             ) as mock_run:
+            build_web_frontend(tmp_path)
+        for call in mock_run.call_args_list:
+            assert call.kwargs.get("shell") is False, (
+                f"npm subprocess on POSIX must not use shell=True, got {call.kwargs}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +630,75 @@ class TestRunTests:
             results = run_tests(tmp_path, venv)
         assert len(results) == 1  # only pytest
 
+    def test_npx_uses_shell_on_windows(self, tmp_path: Path) -> None:
+        """The vitest run must pass shell=True on Windows.
+
+        ``["npx", ...]`` without shell raises FileNotFoundError on
+        Windows because ``CreateProcess`` won't resolve ``npx.cmd``.
+        This crashed the whole install with an unhandled
+        ``[WinError 2]`` on the install-fix branch.
+        """
+        venv = tmp_path / ".venv"
+        web = tmp_path / "web"
+        web.mkdir()
+        (web / "package.json").write_text("{}")
+        cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("clarity_agent.setup.installer._IS_WINDOWS", True), \
+             patch(
+                 "clarity_agent.setup.installer.subprocess.run", return_value=cp,
+             ) as mock_run:
+            run_tests(tmp_path, venv)
+        # Two calls: pytest (no shell needed — venv_python is absolute)
+        # and npx vitest (shell=True on Windows).
+        assert mock_run.call_count == 2
+        # The pytest invocation does not need shell=True even on
+        # Windows because venv_python resolves to an absolute .exe;
+        # we don't enforce its value, only the npx call's.
+        npx_call = mock_run.call_args_list[1]
+        assert npx_call.args[0][0] == "npx"
+        assert npx_call.kwargs.get("shell") is True
+
+    def test_pytest_missing_interpreter_does_not_crash(
+        self, tmp_path: Path,
+    ) -> None:
+        """Broken venv → FAIL StepResult, not unhandled exception.
+
+        Before the fix, ``subprocess.run`` raising FileNotFoundError
+        for a missing ``.venv/bin/python`` propagated all the way out
+        of ``run_install`` and crashed the install script.  Now it
+        surfaces as a normal FAIL the orchestrator can format.
+        """
+        venv = tmp_path / ".venv"
+        with patch(
+            "clarity_agent.setup.installer.subprocess.run",
+            side_effect=FileNotFoundError("no such file"),
+        ):
+            results = run_tests(tmp_path, venv)
+        assert len(results) == 1
+        assert results[0].outcome == Outcome.FAIL
+        assert "interpreter not found" in results[0].message
+
+    def test_npx_missing_does_not_crash(self, tmp_path: Path) -> None:
+        """Missing npx → WARN, not unhandled exception.
+
+        Defensive companion to the pytest case — pytest passes,
+        npx is missing, install proceeds with a warning.
+        """
+        venv = tmp_path / ".venv"
+        web = tmp_path / "web"
+        web.mkdir()
+        (web / "package.json").write_text("{}")
+        ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch(
+            "clarity_agent.setup.installer.subprocess.run",
+            side_effect=[ok, FileNotFoundError("npx missing")],
+        ):
+            results = run_tests(tmp_path, venv)
+        assert len(results) == 2
+        assert results[0].outcome == Outcome.OK  # pytest
+        assert results[1].outcome == Outcome.WARN  # vitest skipped
+        assert "npx not found" in results[1].message
+
 
 # ---------------------------------------------------------------------------
 # run_install (orchestrator)
@@ -545,6 +730,11 @@ class TestRunInstall:
         url_cp = subprocess.CompletedProcess(
             [], 0, stdout=f"{url}\n", stderr="",
         )
+        # The test sequences subprocess calls precisely; pin the
+        # installer to the pip path (not the uv-pip shortcut) so the
+        # call count matches.  ``which`` returns the npm path for
+        # "npm" but None for everything else (notably "uv").
+        which_results = {"npm": "/usr/bin/npm"}
         with patch("clarity_agent.setup.installer.run_preflight", return_value=ok_preflight), \
              patch("clarity_agent.setup.installer.subprocess.run", side_effect=[
                  url_cp,   # resolve_clone_url
@@ -555,7 +745,10 @@ class TestRunInstall:
                  ok_cp,    # npm install
                  ok_cp,    # npm run build
              ]), \
-             patch("clarity_agent.setup.installer.shutil.which", return_value="/usr/bin/npm"):
+             patch(
+                 "clarity_agent.setup.installer.shutil.which",
+                 side_effect=lambda cmd: which_results.get(cmd),
+             ):
             # Need .clarity-agent/web/package.json for build_web_frontend
             web = tmp_path / CLARITY_DIR / "web"
             web.mkdir(parents=True)

@@ -267,9 +267,10 @@ def run_update(
 
     # -- Pip install -----------------------------------------------------
     venv_dir, pip_cwd, pip_spec = _detect_pip_spec(agent_dir)
-    r = install_python_deps(pip_cwd, venv_dir, pip_spec)
-    _record(r)
-    if r.outcome == Outcome.FAIL:
+    pip_results = install_python_deps(pip_cwd, venv_dir, pip_spec)
+    for pr in pip_results:
+        _record(pr)
+    if any(pr.outcome == Outcome.FAIL for pr in pip_results):
         return results
 
     # -- Web frontend rebuild -------------------------------------------

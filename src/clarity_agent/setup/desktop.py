@@ -275,6 +275,14 @@ def _build_web(source_dir: Path) -> StepResult:
 
 def _build_tauri(source_dir: Path, *, release: bool = False) -> StepResult:
     """Run tauri build to produce the native app bundle."""
+    # Capture whether we are running in CI *before* setdefault mutates the
+    # environment.  setdefault is used solely so the DMG bundler skips
+    # Finder/AppleScript interaction in headless builds; the separate CI
+    # check below uses the *original* env value so local builds still get
+    # all bundle types.
+    # Use an explicit check so that CI=false / CI=0 is treated as non-CI.
+    _in_ci = os.environ.get("CI", "").lower() in ("1", "true", "yes")
+
     # Set CI=true so the DMG bundler skips Finder/AppleScript interaction
     # (which opens windows and can hang in headless environments).
     os.environ.setdefault("CI", "true")
@@ -282,6 +290,13 @@ def _build_tauri(source_dir: Path, *, release: bool = False) -> StepResult:
     cmd = ["npx", "--prefix", str(source_dir / "web"), "tauri", "build"]
     if not release:
         cmd.append("--debug")
+
+    # In CI on macOS, skip the DMG bundle.  hdiutil DMG creation is
+    # unreliable in headless runners (bundle_dmg.sh can fail with no
+    # useful diagnostics), and distribution artifacts are not needed
+    # for build verification.  The .app bundle is sufficient.
+    if _in_ci and sys.platform == "darwin":
+        cmd.extend(["--bundles", "app"])
 
     # Ensure the Tauri build targets the same architecture as the Rust
     # toolchain.  Without this, ARM64 Windows with an x86_64 Rust
@@ -375,6 +390,190 @@ def _collect_outputs(source_dir: Path, *, release: bool = False) -> StepResult:
 
 
 # ---------------------------------------------------------------------------
+# Persistence + install
+# ---------------------------------------------------------------------------
+
+def _persistence_target() -> Path:
+    """Where built bundles get moved before installation.
+
+    The build runs from a tmpdir when invoked via ``install.sh`` —
+    the ``dist/`` directory ends up inside ``$WORK`` and gets nuked
+    on script exit, so the user has nothing to install from.  Move
+    the artifacts to the platform's stable user data location
+    instead, alongside the rest of Clarity's persistent state.
+    """
+    from clarity_agent.app_paths import clarity_data_dir
+    return clarity_data_dir() / "builds" / "dist"
+
+
+def _persist_dist(source_dir: Path) -> StepResult:
+    """Move the built bundle out of the (potentially-tmp) source dir."""
+    src = source_dir / "dist"
+    if not src.exists() or not any(src.iterdir()):
+        return StepResult(Outcome.WARN, "No dist/ to persist (build produced no artifacts)")
+    dst = _persistence_target()
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+    return StepResult(Outcome.OK, f"Bundle persisted to {dst}")
+
+
+def _open_installer(persisted_dist: Path) -> StepResult:
+    """Hand off to the platform's standard install flow.
+
+    macOS: ``open Clarity.dmg`` (Finder shows the drag-to-Applications
+    window).  Windows: ``start Clarity.msi`` (MSI wizard with its own
+    UAC prompt).  Linux: print the install commands — there's no
+    universal Linux installer GUI, and silently auto-installing would
+    need ``sudo``.
+
+    Falls back to printing the path when the platform's open command
+    is missing (e.g. headless CI).
+    """
+    if sys.platform == "darwin":
+        dmg = next(iter(persisted_dist.glob("*.dmg")), None)
+        if dmg is None:
+            return StepResult(
+                Outcome.WARN,
+                f"No .dmg found in {persisted_dist} — open the .app there manually",
+            )
+        try:
+            subprocess.run(["open", str(dmg)], check=True, timeout=30)
+            return StepResult(
+                Outcome.OK,
+                f"Opened {dmg.name} — drag Clarity into Applications",
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return StepResult(
+                Outcome.WARN,
+                f"Could not launch 'open' — install manually from {dmg}",
+            )
+
+    if sys.platform == "win32":
+        msi = next(iter(persisted_dist.glob("*.msi")), None)
+        if msi is None:
+            return StepResult(
+                Outcome.WARN,
+                f"No .msi found in {persisted_dist}",
+            )
+        try:
+            subprocess.run(["cmd", "/c", "start", "", str(msi)], check=True, timeout=30)
+            return StepResult(
+                Outcome.OK, f"Launched {msi.name} installer wizard",
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return StepResult(
+                Outcome.WARN,
+                f"Could not launch installer — run {msi} manually",
+            )
+
+    # Linux: print instructions for whatever's in the dist.
+    deb = next(iter(persisted_dist.glob("*.deb")), None)
+    appimage = next(iter(persisted_dist.glob("*.AppImage")), None)
+    instructions: list[str] = []
+    if deb is not None:
+        instructions.append(f"sudo dpkg -i {deb}")
+    if appimage is not None:
+        instructions.append(f"chmod +x {appimage}  # then run it directly")
+    if not instructions:
+        return StepResult(
+            Outcome.WARN,
+            f"No .deb or .AppImage in {persisted_dist}",
+        )
+    return StepResult(
+        Outcome.OK,
+        "Install with: " + "  OR  ".join(instructions),
+    )
+
+
+def _auto_install(persisted_dist: Path) -> StepResult:
+    """Install directly into the platform's standard location.
+
+    macOS: copy ``.app`` to ``/Applications`` (falls back to
+    ``~/Applications`` if no write permission), and strip the
+    ``com.apple.quarantine`` attr so the app launches without the
+    "downloaded from internet" Gatekeeper prompt.
+
+    Windows: ``msiexec /i <file>.msi /qb`` for a basic-UI silent
+    install.  May trigger a UAC prompt; if elevation is denied the
+    msiexec exit code surfaces in the FAIL message.
+
+    Linux: ``sudo dpkg -i <file>.deb`` (errors out if no sudo /
+    user is not in sudoers — that's the operator's problem to
+    resolve).  AppImage gets ``chmod +x`` and is left in place.
+    """
+    if sys.platform == "darwin":
+        app = next(iter(persisted_dist.glob("*.app")), None)
+        if app is None:
+            return StepResult(Outcome.FAIL, f"No .app found in {persisted_dist}")
+        # Try /Applications first, fall back to ~/Applications on
+        # permission denial.  Prefer the global install when possible
+        # — that's what users expect from a "real" installation.
+        for target in (Path("/Applications"), Path.home() / "Applications"):
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                dst = target / app.name
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(app, dst)
+                # Best-effort quarantine strip — fine if xattr is missing.
+                subprocess.run(
+                    ["xattr", "-dr", "com.apple.quarantine", str(dst)],
+                    capture_output=True,
+                )
+                return StepResult(
+                    Outcome.OK, f"Installed to {dst}",
+                )
+            except PermissionError:
+                continue
+        return StepResult(
+            Outcome.FAIL,
+            "Could not write to /Applications or ~/Applications",
+        )
+
+    if sys.platform == "win32":
+        msi = next(iter(persisted_dist.glob("*.msi")), None)
+        if msi is None:
+            return StepResult(Outcome.FAIL, f"No .msi found in {persisted_dist}")
+        r = subprocess.run(
+            ["msiexec", "/i", str(msi), "/qb"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode != 0:
+            return StepResult(
+                Outcome.FAIL,
+                f"msiexec exit {r.returncode}: "
+                f"{(r.stderr or r.stdout or '').strip() or 'no output'}",
+            )
+        return StepResult(Outcome.OK, f"Installed {msi.name}")
+
+    # Linux
+    deb = next(iter(persisted_dist.glob("*.deb")), None)
+    appimage = next(iter(persisted_dist.glob("*.AppImage")), None)
+    if deb is not None:
+        r = subprocess.run(
+            ["sudo", "dpkg", "-i", str(deb)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if r.returncode != 0:
+            return StepResult(
+                Outcome.FAIL,
+                f"dpkg exit {r.returncode}: {(r.stderr or '').strip()}",
+            )
+        return StepResult(Outcome.OK, f"Installed {deb.name}")
+    if appimage is not None:
+        appimage.chmod(appimage.stat().st_mode | 0o111)
+        return StepResult(
+            Outcome.OK,
+            f"{appimage.name} marked executable in {persisted_dist}",
+        )
+    return StepResult(
+        Outcome.FAIL, f"No .deb or .AppImage in {persisted_dist}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -382,14 +581,20 @@ def run_desktop_install(
     source_dir: Path,
     *,
     release: bool = False,
+    auto_install: bool = False,
     on_step: Callable[[StepResult], None] | None = None,
 ) -> list[StepResult]:
     """Build the Clarity desktop app for the current platform.
 
     Args:
-        source_dir: The clarity-agent repo root.
-        release:    If True, produce an optimized release build.
-        on_step:    Optional callback for real-time progress output.
+        source_dir:   The clarity-agent repo root.
+        release:      If True, produce an optimized release build.
+        auto_install: If True, after building, copy the .app into
+                      /Applications (or run msiexec /qb on Windows,
+                      dpkg on Linux) directly instead of opening the
+                      installer for the user to drive.  Convenient
+                      for developers; may need elevated privileges.
+        on_step:      Optional callback for real-time progress output.
     """
     results: list[StepResult] = []
 
@@ -441,6 +646,23 @@ def run_desktop_install(
 
     # Collect outputs
     _record(_collect_outputs(source_dir, release=release))
+    if results[-1].outcome == Outcome.FAIL:
+        return results
+
+    # Move dist/ out of source_dir.  Critical when source_dir is a
+    # tmpdir (e.g. install.sh's $WORK), where the artifacts would
+    # otherwise be deleted on script exit.
+    _record(_persist_dist(source_dir))
+    if results[-1].outcome == Outcome.FAIL:
+        return results
+
+    # Final step: hand off to the platform's install flow, or
+    # auto-install if the operator asked for it.
+    persisted = _persistence_target()
+    if auto_install:
+        _record(_auto_install(persisted))
+    else:
+        _record(_open_installer(persisted))
 
     return results
 
@@ -460,6 +682,16 @@ def _cli_main(argv: Sequence[str] | None = None, source_dir: Path | None = None)
         "--release",
         action="store_true",
         help="Produce an optimized release build",
+    )
+    parser.add_argument(
+        "--auto-install",
+        action="store_true",
+        help=(
+            "Install the built bundle directly into the platform's "
+            "standard location (/Applications, msiexec /qb, dpkg) "
+            "instead of opening the installer for the user.  "
+            "Convenient for developers; may need elevated privileges."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -484,7 +716,12 @@ def _cli_main(argv: Sequence[str] | None = None, source_dir: Path | None = None)
 
     info(f"Building Clarity for {_PLATFORM_LABEL}")
 
-    results = run_desktop_install(source_dir, release=args.release, on_step=emit)
+    results = run_desktop_install(
+        source_dir,
+        release=args.release,
+        auto_install=args.auto_install,
+        on_step=emit,
+    )
 
     if any(r.outcome == Outcome.FAIL for r in results):
         print()
@@ -495,17 +732,15 @@ def _cli_main(argv: Sequence[str] | None = None, source_dir: Path | None = None)
     info("Build complete!")
     print()
 
-    dist_dir = source_dir / "dist"
-    print(f"  Outputs in: {dist_dir}/")
-    if dist_dir.exists():
-        for f in sorted(dist_dir.iterdir()):
+    # source_dir/dist/ has been moved to the persisted location by
+    # _persist_dist; show the operator where to find the artifacts.
+    persisted = _persistence_target()
+    if persisted.exists():
+        print(f"  Outputs in: {persisted}/")
+        for f in sorted(persisted.iterdir()):
             if not f.name.startswith("."):
                 size_mb = sum(
                     p.stat().st_size for p in (f.rglob("*") if f.is_dir() else [f]) if p.is_file()
                 ) / (1024 * 1024)
                 print(f"    {f.name}  ({size_mb:.0f} MB)")
-    if sys.platform == "darwin":
-        app = dist_dir / "Clarity.app"
-        if app.exists():
-            print(f'\n  To run: open "{app}"')
     print()
