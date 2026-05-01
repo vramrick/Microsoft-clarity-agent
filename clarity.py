@@ -128,6 +128,8 @@ def _cmd_install(args: argparse.Namespace) -> None:
         desktop_argv: list[str] = []
         if args.release:
             desktop_argv.append("--release")
+        if args.auto_install:
+            desktop_argv.append("--auto-install")
         desktop_install(desktop_argv, source_dir=source_dir)
 
 
@@ -560,6 +562,18 @@ def main() -> None:
         help=(
             "Skip the test run that the CLI install performs in dev "
             "mode.  Ignored in --mode desktop."
+        ),
+    )
+    install_parser.add_argument(
+        "--auto-install",
+        action="store_true",
+        help=(
+            "After building the desktop app, install it directly into "
+            "the platform's standard location (/Applications on macOS, "
+            "via msiexec /qb on Windows, dpkg/AppImage copy on Linux) "
+            "rather than opening the installer for the user to drive.  "
+            "Convenient for developers; may need elevated privileges "
+            "on Windows/Linux.  Ignored in --mode cli."
         ),
     )
 
