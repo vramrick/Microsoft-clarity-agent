@@ -2,9 +2,12 @@
 
 Three surfaces:
 
-- :func:`_extract_done_marker` — pure string helper that recognizes
-  the ``[DONE]`` termination marker only as the last own-line of the
-  user's message.
+- :func:`_extract_termination_intent` — pure string helper that
+  parses the ``STATUS:`` line at the end of the user-LLM's message
+  and returns the cleaned message plus an intent of ``"ongoing"`` /
+  ``"closing"`` / ``"done"``.  Replaces the older ``[DONE]`` marker
+  with a graduated three-state protocol that gives the LLM a soft
+  "I'm wrapping up" option without forcing a hard hang-up.
 
 - :func:`_strip_safety_disclaimer` — pure string helper that removes
   out-of-character AI-meta safety disclaimers ("Just to be clear, I
@@ -14,10 +17,11 @@ Three surfaces:
   hedging isn't false-positived.
 
 - :meth:`SimulatedUser.converse_with` — the loop semantics that wire
-  the marker and the scrubber into the user↔target flow.  A pure
-  hang-up breaks before sending; a natural-closing + marker sends the
-  closing + captures one final reply; a scrubbed disclaimer is logged
-  and the clean message continues through the loop.
+  the STATUS protocol, the scrubber, the goodbye heuristic, and the
+  bidirectional closure check into the user↔target flow.  A pure
+  hang-up (CLOSING/DONE alone) breaks before sending; a closing
+  message with body sends + captures one final reply; an assistant
+  farewell also closes the loop without polling the user again.
 """
 
 from __future__ import annotations
@@ -28,9 +32,12 @@ from unittest.mock import MagicMock
 import pytest
 from evals.framework.user import (
     _GOODBYE_MAX_LEN,
+    _INTENT_CLOSING,
+    _INTENT_DONE,
+    _INTENT_ONGOING,
     _PERSONA_REMINDER,
     SimulatedUser,
-    _extract_done_marker,
+    _extract_termination_intent,
     _looks_like_disclaimer,
     _looks_like_goodbye,
     _serialize_dialogue,
@@ -39,90 +46,146 @@ from evals.framework.user import (
 )
 
 # ---------------------------------------------------------------------------
-# _extract_done_marker
+# _extract_termination_intent (STATUS protocol)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("message", [
     "",
-    "no marker here",
+    "no status line here",
     "just a normal message\nwith multiple lines",
+    # Bare word "status" or "done" without the "STATUS:" structure
+    # shouldn't trigger.  These would have terminated under the old
+    # bare-word marker; they don't under the structured protocol.
+    "I'm done with this approach.",
+    "What's the status of the deployment?",
 ])
-def test_extract_marker_absent_returns_unchanged(message: str) -> None:
-    cleaned, is_done = _extract_done_marker(message)
+def test_extract_status_absent_defaults_to_ongoing(message: str) -> None:
+    """No STATUS line ⇒ ONGOING.  Message returned unchanged."""
+    cleaned, intent = _extract_termination_intent(message)
     assert cleaned == message
-    assert is_done is False
+    assert intent == _INTENT_ONGOING
 
 
-def test_extract_marker_alone() -> None:
-    """Pure hang-up: marker is the whole message."""
-    cleaned, is_done = _extract_done_marker("[DONE]")
+@pytest.mark.parametrize("status_line,expected", [
+    ("STATUS: ONGOING", _INTENT_ONGOING),
+    ("STATUS: CLOSING", _INTENT_CLOSING),
+    ("STATUS: DONE", _INTENT_DONE),
+])
+def test_extract_status_alone_pure_hangup(
+    status_line: str, expected: str,
+) -> None:
+    """STATUS line with no body ⇒ empty cleaned, intent matches."""
+    cleaned, intent = _extract_termination_intent(status_line)
     assert cleaned == ""
-    assert is_done is True
+    assert intent == expected
 
 
-def test_extract_marker_after_closing_message() -> None:
-    """Natural case: goodbye + marker on its own line."""
-    cleaned, is_done = _extract_done_marker(
-        "Thanks for the help, see you later!\n[DONE]",
+def test_extract_status_after_closing_message() -> None:
+    """Natural case: closing text + STATUS line on its own."""
+    cleaned, intent = _extract_termination_intent(
+        "Thanks for the help, see you later!\nSTATUS: DONE",
     )
     assert cleaned == "Thanks for the help, see you later!"
-    assert is_done is True
+    assert intent == _INTENT_DONE
 
 
-def test_extract_marker_with_trailing_whitespace() -> None:
-    """Trailing blank lines after the marker don't matter."""
-    cleaned, is_done = _extract_done_marker("bye\n[DONE]\n\n  \n")
+def test_extract_status_closing_intent_for_soft_close() -> None:
+    """CLOSING is the graceful "one more reply, then end" path."""
+    cleaned, intent = _extract_termination_intent(
+        "I think I'm wrapping up here, thanks.\nSTATUS: CLOSING",
+    )
+    assert cleaned == "I think I'm wrapping up here, thanks."
+    assert intent == _INTENT_CLOSING
+
+
+def test_extract_status_with_trailing_whitespace() -> None:
+    """Trailing blank lines after the STATUS line don't matter."""
+    cleaned, intent = _extract_termination_intent(
+        "bye\nSTATUS: DONE\n\n  \n",
+    )
     assert cleaned == "bye"
-    assert is_done is True
+    assert intent == _INTENT_DONE
 
 
-def test_extract_marker_inline_not_terminating() -> None:
-    """Marker-looking text inside a sentence must not terminate."""
-    cleaned, is_done = _extract_done_marker("I'm not [DONE] yet, keep going")
-    assert cleaned == "I'm not [DONE] yet, keep going"
-    assert is_done is False
+def test_extract_status_inline_not_terminating() -> None:
+    """STATUS-shaped text inside a sentence must not terminate."""
+    cleaned, intent = _extract_termination_intent(
+        "I'd set my STATUS: ONGOING for the sprint, sure",
+    )
+    assert cleaned == "I'd set my STATUS: ONGOING for the sprint, sure"
+    assert intent == _INTENT_ONGOING
 
 
-def test_extract_marker_middle_line_not_terminating() -> None:
-    """Marker on a non-last line does not terminate.
+def test_extract_status_middle_line_not_terminating() -> None:
+    """STATUS on a non-last line does not terminate.
 
-    The user LLM might produce multi-paragraph output with the phrase
-    somewhere inside; only a trailing own-line marker is the signal.
+    The user LLM might produce multi-paragraph output with a
+    STATUS-shaped line somewhere inside; only the trailing own-line
+    is the control signal.
     """
-    msg = "First para.\n[DONE]\nActually never mind, more to say."
-    cleaned, is_done = _extract_done_marker(msg)
+    msg = "First para.\nSTATUS: DONE\nActually never mind, more to say."
+    cleaned, intent = _extract_termination_intent(msg)
     assert cleaned == msg
-    assert is_done is False
+    assert intent == _INTENT_ONGOING
 
 
-def test_extract_marker_case_insensitive() -> None:
-    """[done], [Done], [DONE] all count — LLMs aren't consistent."""
-    for variant in ("[done]", "[Done]", "[DONE]", "[dOnE]"):
-        cleaned, is_done = _extract_done_marker(f"bye\n{variant}")
-        assert is_done is True, f"should match: {variant!r}"
+def test_extract_status_case_insensitive() -> None:
+    """status: done / Status: Done / STATUS: DONE all count —
+    LLMs aren't consistent about casing."""
+    for variant in (
+        "status: done", "Status: Done", "STATUS: DONE",
+        "STATUS: done", "status: DONE",
+    ):
+        cleaned, intent = _extract_termination_intent(f"bye\n{variant}")
+        assert intent == _INTENT_DONE, f"should match DONE: {variant!r}"
         assert cleaned == "bye"
 
 
-def test_extract_marker_preserves_internal_whitespace() -> None:
-    """Marker extraction shouldn't rewrite the body."""
-    msg = "line 1\n\nline 3 with  internal  spaces\n[DONE]"
-    cleaned, is_done = _extract_done_marker(msg)
-    assert is_done is True
+def test_extract_status_tolerates_decoration() -> None:
+    """Brackets, equals-sign, asterisks the LLM might add around the
+    STATUS line are tolerated.  The structured signal survives mild
+    formatting variation."""
+    for variant in (
+        "[STATUS: DONE]", "**STATUS: DONE**", "STATUS = DONE",
+        "[status: closing]",
+    ):
+        _, intent = _extract_termination_intent(f"bye\n{variant}")
+        assert intent != _INTENT_ONGOING, f"should terminate on: {variant!r}"
+
+
+def test_extract_status_preserves_internal_whitespace() -> None:
+    """Extraction shouldn't rewrite the message body."""
+    msg = "line 1\n\nline 3 with  internal  spaces\nSTATUS: DONE"
+    cleaned, intent = _extract_termination_intent(msg)
+    assert intent == _INTENT_DONE
     assert cleaned == "line 1\n\nline 3 with  internal  spaces"
 
 
-def test_extract_marker_empty_string() -> None:
+def test_extract_status_empty_string() -> None:
     """Edge: completely empty input."""
-    cleaned, is_done = _extract_done_marker("")
+    cleaned, intent = _extract_termination_intent("")
     assert cleaned == ""
-    assert is_done is False
+    assert intent == _INTENT_ONGOING
+
+
+def test_extract_status_unrecognized_value_defaults_to_ongoing() -> None:
+    """Defensive: a STATUS-shaped line with a value we don't know
+    (e.g. STATUS: PENDING) should NOT terminate — safe-default to
+    "keep going" rather than spuriously hang up on garbled output."""
+    cleaned, intent = _extract_termination_intent("hi\nSTATUS: PENDING")
+    assert intent == _INTENT_ONGOING
+    # Body is returned unchanged because no recognized STATUS was
+    # parsed, so nothing was stripped.
+    assert cleaned == "hi\nSTATUS: PENDING"
 
 
 # ---------------------------------------------------------------------------
-# converse_with — loop semantics around the marker
+# converse_with — loop semantics around the STATUS protocol
 #
 # These use a scripted backend + target so we can assert the exact
-# turn sequence that results from each kind of [DONE] usage.
+# turn sequence that results from each kind of STATUS usage: pure
+# hang-up (STATUS line alone), closing-message + STATUS (one final
+# target reply, then break), and STATUS appearing mid-conversation.
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -177,11 +240,11 @@ def _make_user(user_responses: list[str]) -> tuple[SimulatedUser, _ScriptedBacke
 
 
 def test_pure_hangup_breaks_before_target(tmp_path) -> None:  # noqa: ARG001 — fixture
-    """``[DONE]`` alone on turn 1: no target call, stopped_early=True.
+    """``STATUS: DONE`` alone on turn 1: no target call, stopped_early=True.
 
-    The user's first response is just the marker — nothing to send.
+    The user's first response is just the STATUS line — nothing to send.
     """
-    user, backend = _make_user(["[DONE]"])
+    user, backend = _make_user(["STATUS: DONE"])
     target = _make_target([])
 
     result = user.converse_with(target, max_turns=10)
@@ -193,17 +256,17 @@ def test_pure_hangup_breaks_before_target(tmp_path) -> None:  # noqa: ARG001 —
     assert len(backend.sent) == 1
 
 
-def test_closing_message_with_marker_sends_and_breaks() -> None:
-    """Natural goodbye + marker: target gets one final reply, then stop.
+def test_closing_message_with_status_sends_and_breaks() -> None:
+    """Natural goodbye + STATUS: DONE: target gets one final reply, then stop.
 
-    User opens, target replies, user says "thanks, bye [DONE]".  We
+    User opens, target replies, user says "thanks, bye \\nSTATUS: DONE".  We
     expect the closing message to be delivered to the target, the
     target's final response to be captured, and the loop to break —
     without asking the user LLM for yet another turn.
     """
     user, backend = _make_user([
-        "hi, can you help me?",                     # opening
-        "Thanks, I've got what I need!\n[DONE]",    # closing + marker
+        "hi, can you help me?",                          # opening
+        "Thanks, I've got what I need!\nSTATUS: DONE",   # closing + status
     ])
     target = _make_target([
         "Sure, what's the question?",
@@ -214,10 +277,10 @@ def test_closing_message_with_marker_sends_and_breaks() -> None:
 
     assert result.turn_count == 2
     assert result.stopped_early is True
-    # The marker was stripped before sending to the target.
+    # The STATUS line was stripped before sending to the target.
     last_sent_to_target = target.chat.call_args_list[-1].args[0]
     assert last_sent_to_target == "Thanks, I've got what I need!"
-    assert "[DONE]" not in last_sent_to_target
+    assert "STATUS" not in last_sent_to_target
     # Transcript records both turns, including the closing exchange.
     assert result.turns[-1].user == "Thanks, I've got what I need!"
     assert result.turns[-1].target == "You're welcome, good luck!"
@@ -225,12 +288,40 @@ def test_closing_message_with_marker_sends_and_breaks() -> None:
     assert len(backend.sent) == 2
 
 
-def test_marker_mid_conversation_still_works() -> None:
-    """Marker on turn N works the same — send closing, target replies, stop."""
+def test_closing_message_with_status_closing_also_terminates() -> None:
+    """``STATUS: CLOSING`` behaves the same as DONE at the framework level.
+
+    The two values are expressively different ("soft wrap-up" vs
+    "hard hang-up") but produce the same loop behavior: one final
+    target reply, then break.
+    """
+    user, backend = _make_user([
+        "opening",
+        "Thanks, that's helpful — I think I'm wrapping up.\nSTATUS: CLOSING",
+    ])
+    target = _make_target([
+        "Sure, what's up?",
+        "Glad I could help!",
+    ])
+
+    result = user.converse_with(target, max_turns=10)
+
+    assert result.turn_count == 2
+    assert result.stopped_early is True
+    # Closing message delivered, STATUS line stripped.
+    last_sent = target.chat.call_args_list[-1].args[0]
+    assert "STATUS" not in last_sent
+    assert last_sent == "Thanks, that's helpful — I think I'm wrapping up."
+    # Loop did not poll the user-LLM for a turn-3 message.
+    assert len(backend.sent) == 2
+
+
+def test_status_mid_conversation_still_works() -> None:
+    """STATUS on turn N works the same — send closing, target replies, stop."""
     user, backend = _make_user([
         "opening",
         "follow up",
-        "ok, I've got it, thanks!\n[DONE]",
+        "ok, I've got it, thanks!\nSTATUS: DONE",
     ])
     target = _make_target([
         "response 1",
@@ -244,12 +335,12 @@ def test_marker_mid_conversation_still_works() -> None:
     assert result.stopped_early is True
     assert target.chat.call_count == 3
     assert result.turns[-1].target == "response 3 (closing)"
-    # No extra user-LLM call after the marker turn.
+    # No extra user-LLM call after the STATUS turn.
     assert len(backend.sent) == 3
 
 
-def test_no_marker_runs_full_budget() -> None:
-    """Without the marker, the loop uses the full max_turns budget."""
+def test_no_status_runs_full_budget() -> None:
+    """Without STATUS: DONE/CLOSING, the loop uses the full max_turns budget."""
     user, backend = _make_user([
         "opening",
         "turn 2",
@@ -267,6 +358,34 @@ def test_no_marker_runs_full_budget() -> None:
     assert result.stopped_early is False
     # Budget 3 turns: opening + 2 follow-ups on user side = 3 backend calls.
     assert len(backend.sent) == 3
+
+
+def test_status_ongoing_does_not_terminate() -> None:
+    """``STATUS: ONGOING`` is the user explicitly saying "keep going".
+
+    Verifies the STATUS line is stripped from the body but the loop
+    continues — both the explicit-ongoing and absent-status cases run
+    to budget.
+    """
+    user, backend = _make_user([
+        "opening",
+        "more thoughts here\nSTATUS: ONGOING",
+        "turn 3",
+    ])
+    target = _make_target([
+        "reply 1",
+        "reply 2",
+        "reply 3",
+    ])
+
+    result = user.converse_with(target, max_turns=3)
+
+    assert result.turn_count == 3
+    assert result.stopped_early is False
+    # The STATUS line was stripped before being sent to the target.
+    second_sent = target.chat.call_args_list[1].args[0]
+    assert second_sent == "more thoughts here"
+    assert "STATUS" not in second_sent
 
 
 # ---------------------------------------------------------------------------
@@ -455,11 +574,11 @@ def test_dialogue_no_log_path_skips_file_write(tmp_path) -> None:
     assert len(result.user_llm_dialogue) >= 3  # system + user + assistant
 
 
-def test_marker_survives_accidental_user_prefix() -> None:
-    """If the LLM emits 'User: thanks\\n[DONE]', strip the prefix AND the marker."""
+def test_status_survives_accidental_user_prefix() -> None:
+    """If the LLM emits 'User: thanks\\nSTATUS: DONE', strip prefix AND status."""
     user, backend = _make_user([
         "opening",
-        "User: thanks for the help\n[DONE]",
+        "User: thanks for the help\nSTATUS: DONE",
     ])
     target = _make_target(["response 1", "you're welcome"])
 
@@ -467,7 +586,7 @@ def test_marker_survives_accidental_user_prefix() -> None:
 
     assert result.turn_count == 2
     assert result.stopped_early is True
-    # "User:" prefix stripped AND marker stripped.
+    # "User:" prefix stripped AND STATUS line stripped.
     last_sent_to_target = target.chat.call_args_list[-1].args[0]
     assert last_sent_to_target == "thanks for the help"
     assert len(backend.sent) == 2
@@ -662,10 +781,12 @@ def test_converse_handles_disclaimer_only_message_as_empty() -> None:
 # ---------------------------------------------------------------------------
 # _looks_like_goodbye + implicit-goodbye fallback
 #
-# Backup for the [DONE] marker: catches short messages that end with
-# a farewell phrase, which is the typical shape of a user "hanging
-# up" without producing the marker.  Both halves required (short AND
-# trailing farewell) to keep false positives rare.
+# Backup for the STATUS protocol: catches short messages that end
+# with a farewell phrase, which is the typical shape of a user
+# "hanging up" without producing a STATUS line.  Both halves required
+# (short AND trailing farewell) to keep false positives rare.  Same
+# detector runs on the assistant side so a clear target close also
+# stops the loop.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("message", [
@@ -796,7 +917,7 @@ def test_looks_like_goodbye_mid_message_farewell_paragraph_does_not_fire() -> No
 
 
 def test_converse_implicit_goodbye_terminates_after_target_reply() -> None:
-    """User says goodbye without [DONE] → target gets one reply, then stop."""
+    """User says goodbye without a STATUS line → target gets one reply, then stop."""
     user, backend = _make_user([
         "opening question",
         "Thanks for your help, goodbye!",
@@ -845,16 +966,16 @@ def test_converse_no_implicit_goodbye_when_message_long() -> None:
     assert result.stopped_early is False
 
 
-def test_converse_explicit_done_takes_precedence_over_goodbye() -> None:
-    """If the user emits both a farewell AND [DONE], we still stop cleanly.
+def test_converse_explicit_status_takes_precedence_over_goodbye() -> None:
+    """If the user emits both a farewell AND STATUS: DONE, we stop cleanly.
 
-    The two paths shouldn't double-trigger; the [DONE] path runs and
-    the goodbye check is skipped.  This is just behavioral sanity:
+    The two paths shouldn't double-trigger; the STATUS path runs and
+    the implicit-goodbye check is redundant.  Behavioral sanity:
     nothing observable changes, but verifies the fall-through.
     """
     user, backend = _make_user([
         "opening",
-        "Thanks for your help, goodbye!\n[DONE]",
+        "Thanks for your help, goodbye!\nSTATUS: DONE",
     ])
     target = _make_target(["reply 1", "reply 2"])
 
@@ -862,11 +983,80 @@ def test_converse_explicit_done_takes_precedence_over_goodbye() -> None:
 
     assert result.stopped_early is True
     assert result.turn_count == 2
-    # Target sees the cleaned message (no [DONE] marker), with the
+    # Target sees the cleaned message (no STATUS line), with the
     # farewell intact.
     last_sent = target.chat.call_args_list[-1].args[0]
-    assert "[DONE]" not in last_sent
+    assert "STATUS" not in last_sent
     assert "goodbye" in last_sent.lower()
+
+
+# ---------------------------------------------------------------------------
+# Bidirectional closure: assistant-side hang-up
+#
+# The same goodbye heuristic is applied to the target's response.  If
+# the assistant clearly closed the conversation ("good luck, take
+# care!"), we should stop without polling the user-LLM for a turn-N+1
+# message — otherwise the user-LLM tends to produce filler ("ok, will
+# do!", "thanks, talk to you later") that the run doesn't need.
+# ---------------------------------------------------------------------------
+
+
+def test_target_farewell_terminates_loop_before_polling_user() -> None:
+    """Assistant says goodbye → no further user-LLM calls.
+
+    Loop ran turn 1 (user opening + target reply containing a clear
+    farewell).  Even though max_turns is 10 and the user has more
+    scripted responses queued, the loop must break before asking the
+    user backend for turn 2.
+    """
+    user, backend = _make_user([
+        "opening question",
+        "this should never be sent",  # safety: not consumed
+    ])
+    target = _make_target([
+        "Glad I could help — take care!",
+    ])
+
+    result = user.converse_with(target, max_turns=10)
+
+    assert result.turn_count == 1
+    assert result.stopped_early is True
+    assert target.chat.call_count == 1
+    # Only the opening user-LLM call — no follow-up polled.
+    assert len(backend.sent) == 1
+
+
+def test_target_long_substantive_reply_does_not_terminate() -> None:
+    """Inverse: a long target reply that happens to contain "thanks" runs to budget.
+
+    Same length-based safeguard as the user side — a long substantive
+    assistant message containing a farewell-shaped phrase mid-stream
+    must not false-positive into termination.
+    """
+    long_target_reply = (
+        "Here's a fuller breakdown of the rollout. First, the comms "
+        "phase: announce internally, then to customers. Second, the "
+        "instrumentation phase: wire the metrics before flipping the "
+        "flag. Thanks for asking the right questions — let me also "
+        "flag two risks worth your time. Risk one is dependency "
+        "inversion in the auth path; risk two is the migration order."
+    )
+    user, backend = _make_user([
+        "opening",
+        "follow up 1",
+        "follow up 2",
+    ])
+    target = _make_target([
+        long_target_reply,
+        "shorter reply",
+        "another reply",
+    ])
+
+    result = user.converse_with(target, max_turns=3)
+
+    # No early termination: ran the full budget.
+    assert result.turn_count == 3
+    assert result.stopped_early is False
 
 
 # ---------------------------------------------------------------------------
@@ -938,12 +1128,12 @@ def test_converse_wraps_every_subsequent_turn() -> None:
         )
 
 
-def test_converse_scrubber_preserves_done_marker() -> None:
-    """Disclaimer + closing + [DONE] → strip disclaimer, keep closing.
+def test_converse_scrubber_preserves_status_termination() -> None:
+    """Disclaimer + closing + STATUS: DONE → strip disclaimer, keep closing.
 
-    The DONE marker is extracted before scrubbing, so the closing
-    text remains intact and the loop terminates after the target's
-    final reply.
+    The STATUS line is extracted before scrubbing, so the closing
+    text remains intact, the disclaimer paragraph is removed, and the
+    loop terminates after the target's final reply.
     """
     user, backend = _make_user([
         "opening",
@@ -952,7 +1142,7 @@ def test_converse_scrubber_preserves_done_marker() -> None:
             "\n"
             "Just to be clear, this is for educational purposes only "
             "and I don't condone any illegal activity.\n"
-            "[DONE]"
+            "STATUS: DONE"
         ),
     ])
     target = _make_target(["initial reply", "you're welcome"])
@@ -966,4 +1156,4 @@ def test_converse_scrubber_preserves_done_marker() -> None:
     last_sent_to_target = target.chat.call_args_list[1].args[0]
     assert last_sent_to_target == "Thanks, that was super helpful!"
     assert "condone" not in last_sent_to_target
-    assert "[DONE]" not in last_sent_to_target
+    assert "STATUS" not in last_sent_to_target

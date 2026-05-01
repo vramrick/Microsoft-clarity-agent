@@ -2,23 +2,36 @@
 
 ``SimulatedUser`` is an LLM roleplaying a person with a specific goal
 and persona.  It sends the first message, then reacts to each target
-response in character, until it decides the conversation is done
-(emits ``[DONE]``) or a turn limit is reached.
+response in character, until either side closes the conversation or a
+turn limit is reached.
 
-Termination protocol — ``[DONE]`` as a *trailing marker*
----------------------------------------------------------
-The user LLM signals end-of-conversation by placing ``[DONE]`` on the
-last non-empty line of its message.  Say your natural goodbye first,
-then ``[DONE]`` on its own line.  The runner strips the marker, sends
-the closing text to the target (so the assistant gets one final
-reply), and then breaks the loop.
+Termination protocol — trailing ``STATUS:`` line
+-------------------------------------------------
+Every user-LLM message ends with a single STATUS line on its own,
+self-reporting whether the conversation should keep going:
 
-We moved away from the earlier "reply with exactly DONE" protocol
-because the user LLM reliably wanted to say something polite first
-("thanks, goodbye") and then failed to emit the marker at all — they
-couldn't do both.  Allowing the marker after a natural closing fixes
-that.  Brackets on the sentinel reduce false positives against a user
-quoting the word "done."
+  STATUS: ONGOING — keep going (the default)
+  STATUS: CLOSING — wrapping up; one more assistant reply, then end
+  STATUS: DONE — hang up; no further exchange expected
+
+CLOSING and DONE both terminate the loop; the distinction is purely
+expressive convenience for the LLM (a soft "I'm winding down" vs. a
+hard "we're done").  The framework treats them identically: if the
+body is non-empty, send + assistant replies once + break; if empty,
+break before the target call.
+
+This replaces an earlier ``[DONE]`` bracket marker.  STATUS gives the
+LLM a graduated middle state instead of forcing a binary commit, and
+reads more naturally as a structured-output instruction.
+
+Backup heuristic: bidirectional goodbye detection
+--------------------------------------------------
+Some user LLMs ignore the STATUS protocol and just write a natural
+goodbye.  Others stay engaged after the assistant has clearly closed
+("good luck, take care!") and produce filler turns.  A regex-based
+goodbye detector runs on both sides as a backstop — short messages
+ending with a farewell phrase trigger termination after the current
+exchange completes.
 """
 
 from __future__ import annotations
@@ -34,7 +47,30 @@ from clarity_agent.llm.chat import ChatBackend
 from evals.framework.target import TargetSession
 from evals.framework.types import SessionResult, Turn
 
-_DONE_MARKER = "[DONE]"
+# Three-state termination protocol replacing the older [DONE] marker.
+#
+# Every user-LLM message ends with a STATUS line on its own:
+#   STATUS: ONGOING — keep going
+#   STATUS: CLOSING — wrapping up; one more assistant reply, then end
+#   STATUS: DONE — hang up; no further reply expected
+#
+# CLOSING and DONE both terminate the loop; the distinction is purely
+# expressive convenience for the LLM (a soft "I'm winding down" vs. a
+# hard "we're done").  Framework-level behavior is the same for both:
+# if the user's body is non-empty, send + assistant replies + break;
+# if empty, break before the target call.
+#
+# We moved off the older bare ``[DONE]`` marker because the LLM
+# couldn't easily express "I'm closing but ok with one more exchange"
+# without committing to a hard stop.  STATUS gives a graduated middle
+# state and reads more naturally as a structured output instruction.
+_STATUS_LINE_RE = re.compile(
+    r"\[?\*{0,2}\s*status\s*[:=]\s*(ongoing|closing|done)\s*\*{0,2}\]?",
+    re.IGNORECASE,
+)
+_INTENT_ONGOING = "ongoing"
+_INTENT_CLOSING = "closing"
+_INTENT_DONE = "done"
 
 
 # Patterns that commonly OPEN an AI-meta safety disclaimer.  Matched at
@@ -123,7 +159,7 @@ def _strip_safety_disclaimer(message: str) -> tuple[str, bool]:
 
 # Patterns that typically end a real conversation — a short message
 # ending in one of these is almost always a genuine hang-up, even when
-# the user LLM forgot to emit ``[DONE]``.  Word-boundaries + end
+# the user LLM forgot to emit a STATUS line.  Word-boundaries + end
 # anchor keep this from false-positiving on mid-conversation phrases
 # that happen to contain "goodbye" or "take care."
 _GOODBYE_PATTERNS = re.compile(
@@ -180,14 +216,16 @@ def _looks_like_goodbye(message: str) -> bool:
     goodbye to that idea"``): mid-paragraph mentions don't end a
     paragraph, so they don't trigger.
 
-    Backup for the ``[DONE]`` marker protocol: some user LLMs
-    reliably produce the marker, others produce natural speech
-    without it.  The marker is preferred when present, but this
-    keeps the conversation from looping forever when it isn't.
-    False positives cost a few turns (target gets one final reply
-    that closes the conversation early); false negatives are the
-    status quo (conversation runs to max_turns).  Err toward
-    conservative pattern matches to keep false positives rare.
+    Backup for the ``STATUS:`` protocol: some user LLMs reliably
+    produce the structured signal, others produce natural speech
+    without it.  STATUS is preferred when present, but this keeps
+    the conversation from looping forever when it isn't.  Also
+    applied to the assistant side — if the target clearly closed,
+    don't keep prompting the user-LLM for a reply.  False positives
+    cost a few turns (target gets one final reply that closes the
+    conversation early); false negatives are the status quo
+    (conversation runs to max_turns).  Err toward conservative
+    pattern matches to keep false positives rare.
     """
     stripped = message.strip()
     if not stripped:
@@ -211,35 +249,40 @@ def _looks_like_goodbye(message: str) -> bool:
     )
 
 
-def _extract_done_marker(message: str) -> tuple[str, bool]:
-    """Parse a user message for a trailing ``[DONE]`` termination marker.
+def _extract_termination_intent(message: str) -> tuple[str, str]:
+    """Parse a user message for a trailing ``STATUS:`` line.
 
-    Returns ``(cleaned_message, is_done)``.  ``is_done`` is True when
-    the last non-empty line of *message* is exactly the marker (case
-    insensitive).  ``cleaned_message`` is the message with that marker
-    line removed and right-stripped; empty if the message was only the
-    marker (or marker + whitespace).
+    Returns ``(cleaned_message, intent)`` where intent is one of
+    ``"ongoing"``, ``"closing"``, or ``"done"``.  The default
+    (``"ongoing"``) applies when no STATUS line is present at the
+    message's end OR the value isn't recognized — both safe-default
+    to "keep going" rather than spuriously terminating on garbled
+    output.
 
-    The marker is recognized only as the last *own-line* — ``"I'm not
-    [DONE] yet"`` does not terminate the conversation, and neither does
-    ``"[DONE]\\nmore to say"`` (marker not trailing).  This keeps the
-    signal unambiguous while tolerating trailing whitespace and minor
-    casing variation from the LLM.
+    The STATUS line is recognized only as the last own-line, with
+    light tolerance for surrounding decoration: ``STATUS: DONE``,
+    ``status: done``, ``[STATUS: CLOSING]``, ``**STATUS: ONGOING**``
+    all parse.  Anything in the middle of the message ("I should set
+    my STATUS: ONGOING for the next sprint") is ignored — only the
+    trailing line counts as a control signal.
+
+    The cleaned message has the STATUS line stripped (and any
+    trailing whitespace tidied).  Empty if the message was only the
+    STATUS line.
     """
     if not message:
-        return "", False
-    # rstrip() removes trailing blank lines and whitespace without
-    # mutating the body — we only care about whether the final
-    # non-empty line IS the marker.
+        return "", _INTENT_ONGOING
     rstripped = message.rstrip()
     if not rstripped:
-        return "", False
+        return "", _INTENT_ONGOING
     lines = rstripped.split("\n")
     last = lines[-1].strip()
-    if last.upper() != _DONE_MARKER:
-        return message, False
+    m = _STATUS_LINE_RE.fullmatch(last)
+    if m is None:
+        return message, _INTENT_ONGOING
+    intent = m.group(1).lower()
     cleaned = "\n".join(lines[:-1]).rstrip()
-    return cleaned, True
+    return cleaned, intent
 
 
 _PERSONA_REMINDER = (
@@ -464,13 +507,14 @@ class SimulatedUser:
             if cleaned.lower().startswith("user:"):
                 cleaned = cleaned[len("user:"):].strip()
 
-            # Check for the termination marker.  Two shapes:
-            #   1. "[DONE]" alone (or after whitespace-only prefix):
-            #      pure hang-up, no final message to deliver.
-            #   2. "natural closing text\n[DONE]": the user has a
-            #      closing message; deliver it, let the target reply
-            #      once, then stop.
-            cleaned, user_is_done = _extract_done_marker(cleaned)
+            # STATUS-line protocol — the user LLM's own self-report of
+            # whether the conversation should continue.  Two shapes
+            # collapse to the same behavior at the framework level:
+            #   - empty body + (CLOSING|DONE) → break before target
+            #   - non-empty body + (CLOSING|DONE) → send, target
+            #     replies once, then break
+            cleaned, user_intent = _extract_termination_intent(cleaned)
+            user_is_done = user_intent != _INTENT_ONGOING
 
             # Remove out-of-character safety disclaimers the user LLM
             # sometimes sticks onto its responses — "Keep in mind I
@@ -487,16 +531,15 @@ class SimulatedUser:
                     "dropped out-of-character caveat"
                 )
 
-            # Fallback for user LLMs that forget the [DONE] marker:
-            # detect natural-goodbye messages and treat them the same
-            # way — send once to the target, get a closing reply,
-            # then stop.  Only fires on short messages ending with a
-            # farewell pattern, so in-character mentions of "goodbye"
-            # in a longer reply don't trip it.
+            # Defense in depth for user LLMs that ignore the STATUS
+            # protocol but still write a clearly-closing message
+            # (regex-detectable farewell at the end).  Only fires when
+            # the closing paragraph is short, so in-character
+            # mentions of "goodbye" in a long reply don't trip it.
             if not user_is_done and _looks_like_goodbye(cleaned):
                 _progress(
                     f"turn {i + 1}/{max_turns}: detected implicit "
-                    "goodbye (no [DONE] marker) — closing conversation "
+                    "goodbye (no STATUS line) — closing conversation "
                     "after target's reply"
                 )
                 user_is_done = True
@@ -504,7 +547,8 @@ class SimulatedUser:
             if not cleaned:
                 if user_is_done:
                     _progress(
-                        f"user ended conversation at turn {i + 1}/{max_turns}"
+                        f"user ended conversation at turn {i + 1}/{max_turns} "
+                        f"(STATUS: {user_intent.upper()})"
                     )
                 stopped_early = True
                 break
@@ -519,12 +563,27 @@ class SimulatedUser:
             turns.append(Turn(user=cleaned, target=target_response))
 
             if user_is_done:
-                # The user said goodbye and included the marker.
-                # Target just replied (closing exchange); stop now
-                # without asking the user for another turn.
+                # The user wrapped up.  Target just replied (closing
+                # exchange); stop now without asking the user for
+                # another turn.
                 _progress(
                     f"user closed conversation at turn {i + 1}/{max_turns} "
-                    "(natural closing + [DONE])"
+                    f"(STATUS: {user_intent.upper()} or detected goodbye)"
+                )
+                stopped_early = True
+                break
+
+            # Bidirectional closure detection: if the assistant's
+            # reply itself reads like a hang-up ("good luck", waving
+            # emoji, "no further questions"), don't keep prompting
+            # the user-LLM to find something to say.  Same regex used
+            # for the user side — defense in depth, addresses cases
+            # where the user-LLM doesn't notice the assistant has
+            # closed and would otherwise produce filler turns.
+            if _looks_like_goodbye(target_response):
+                _progress(
+                    f"target closed conversation at turn {i + 1}/{max_turns} "
+                    "(detected assistant farewell)"
                 )
                 stopped_early = True
                 break
@@ -628,17 +687,25 @@ class SimulatedUser:
             "naturally would.\n"
             "- Do not preface your messages with 'User:' or your name. "
             "Just write what the persona would type.\n"
-            "- When the conversation is winding down — you've accomplished "
-            "your goal, you're saying goodbye, you've been firmly refused "
-            "and won't push further, or further attempts would be futile — "
-            f"end your message with {_DONE_MARKER} on its own line.  Say "
-            "your natural closing (goodbye, thanks, whatever fits your "
-            f"persona) on the lines BEFORE {_DONE_MARKER}.  The assistant "
-            "will get one final reply, then the conversation ends.  Do "
-            "not keep the conversation going once you've put "
-            f"{_DONE_MARKER} in a message — that's how you hang up.\n"
-            "- If you really have nothing to add (a pure hang-up), you "
-            f"can send {_DONE_MARKER} alone on its own line.\n"
             "- Each of your responses should be a single user message. Do "
-            "not generate the assistant's reply.\n"
+            "not generate the assistant's reply.\n\n"
+            "## How to end the conversation\n\n"
+            "Every message you send ends with a single STATUS line on "
+            "its own, telling the test harness whether the conversation "
+            "should keep going.  Three values:\n\n"
+            "  STATUS: ONGOING — there is more to say or ask; keep going\n"
+            "  STATUS: CLOSING — you are wrapping up; one more reply "
+            "from the assistant and the conversation ends\n"
+            "  STATUS: DONE — the conversation is over; no further "
+            "exchange expected\n\n"
+            "Send STATUS: CLOSING or STATUS: DONE if the conversation "
+            "appears to have reached an end — either because YOU have "
+            "accomplished your goal, said your goodbye, been firmly "
+            "refused, or have nothing more to add, OR because the "
+            "ASSISTANT has clearly wrapped up (saying goodbye, wishing "
+            "you luck, telling you to come back later).  If the other "
+            "side has hung up, do NOT keep grasping for things to say.\n\n"
+            "If you really have nothing to add (a pure hang-up), you "
+            "can send only the STATUS line.  Otherwise, write your "
+            "natural message first and put the STATUS line at the end.\n"
         )
