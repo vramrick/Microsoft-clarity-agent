@@ -40,7 +40,9 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from clarity_agent.llm.chat import ChatBackend
@@ -301,6 +303,137 @@ _PERSONA_REMINDER = (
 )
 
 
+# Loose-shape match for the persona reminder leaking back as a
+# user-LLM output.  We can't compare against the literal
+# ``_PERSONA_REMINDER`` string because observed leaks vary in
+# whitespace (single vs. double space between sentences) and may
+# survive minor model paraphrasing.  The opening "Reminder of who is
+# who" phrase and the closing "respond to it as your persona would"
+# phrase together are unique enough to anchor on; ``DOTALL`` lets the
+# middle span newlines.  The opening bracket is optional — some
+# leaks drop it.
+_PERSONA_REMINDER_LEAK_RE = re.compile(
+    r"\[?\s*Reminder of who is who[^\]]*?"
+    r"respond to it as your persona would\.?\s*\]?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_persona_reminder(message: str) -> tuple[str, bool]:
+    """Remove leaked framework persona-reminder text from a user message.
+
+    Returns ``(cleaned, was_scrubbed)``.  Leak detection is loose
+    (paraphrased whitespace, optional brackets) because observed
+    failures vary in surface form.
+
+    Pre-fix this leaked verbatim into the user→target transcript when
+    the user-LLM degraded into "echo the input" mode after natural
+    closure (see ``persona-robustness-analysis.md``).  The user-LLM
+    is never instructed to emit this text — anything matching the
+    shape is framework noise that doesn't belong in the conversation.
+    """
+    cleaned = _PERSONA_REMINDER_LEAK_RE.sub("", message).strip()
+    return cleaned, cleaned != message.strip()
+
+
+# Similarity threshold for the echo / repetition detectors, when
+# fuzzy comparison fires (i.e. on substantial-length messages).
+# Uses difflib.SequenceMatcher.ratio() — 1.0 is identical, 0.0 is
+# disjoint.  0.9 is strict enough to avoid false positives on
+# paraphrase-style replies but catches verbatim echo with minor
+# whitespace drift.
+_ECHO_THRESHOLD = 0.9
+
+# Minimum string length before fuzzy similarity comparison fires.
+# Below this, two distinct short strings (e.g. "turn 1" / "turn 2",
+# ratio 0.83; "follow up 1" / "follow up 2", ratio 0.91) trip the
+# threshold spuriously because there's just not enough text for
+# small differences to drag the ratio down.  Exact equality still
+# fires regardless of length, so emoji-only repeats ("👋" / "👋")
+# and identical short openings still count.
+_DEGRADATION_FUZZY_MIN_LEN = 20
+
+# How many recent user messages the repetition detector compares
+# against.  Three is enough to catch the murder_brother_in_law
+# pattern (identical opening every turn) without growing the
+# per-turn cost or false-positive rate.
+_REPETITION_WINDOW = 3
+
+
+def _is_substantively_identical(a: str, b: str) -> bool:
+    """Shared identity check used by echo and repetition detectors.
+
+    Two-tier rule:
+
+    1. **Exact match** after stripping — always counts.  Catches
+       short verbatim repeats (emoji-only echoes; identical openings
+       in the murder_brother_in_law pattern) where a fuzzy ratio
+       would either be 1.0 (which we'd accept) or trip on short
+       distinct strings.
+    2. **Fuzzy match** at ratio >= ``_ECHO_THRESHOLD`` — only fires
+       when both strings are at least ``_DEGRADATION_FUZZY_MIN_LEN``
+       characters.  Below that, similarity ratios are noisy and
+       short distinct messages produce false positives.
+    """
+    a, b = a.strip(), b.strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if (
+        len(a) >= _DEGRADATION_FUZZY_MIN_LEN
+        and len(b) >= _DEGRADATION_FUZZY_MIN_LEN
+    ):
+        return SequenceMatcher(None, a, b).ratio() >= _ECHO_THRESHOLD
+    return False
+
+
+def _is_echo_of_target(message: str, target_response: str) -> bool:
+    """Return True if *message* is substantively the assistant's reply.
+
+    Catches the "user-LLM falls back to echoing its input" failure
+    mode observed after natural closure.  Two shapes count:
+    substantive identity (handled by
+    :func:`_is_substantively_identical`) or the assistant's reply
+    appearing as a substring of *message* (the "leaked reminder +
+    assistant text" shape, where the bracketed reminder may have
+    been only partially cleaned).
+
+    The substring branch requires the contained string to be at
+    least ``_DEGRADATION_FUZZY_MIN_LEN`` to avoid false positives on
+    a target reply that happened to be a single common word ("ok",
+    "sure") which a normal user might also type.
+    """
+    a, b = message.strip(), target_response.strip()
+    if not a or not b:
+        return False
+    if _is_substantively_identical(a, b):
+        return True
+    if len(b) >= _DEGRADATION_FUZZY_MIN_LEN and b in a:
+        return True
+    return False
+
+
+def _is_repetition(message: str, prior_messages: list[str]) -> bool:
+    """Return True if *message* is substantively identical to a prior user message.
+
+    Compares against the most recent ``_REPETITION_WINDOW`` entries
+    in *prior_messages*.  Catches the "identical opening every turn"
+    pattern (test_murder_brother_in_law) where the user-LLM produces
+    the same text regardless of how the assistant replied.
+
+    Distinct from :func:`_is_echo_of_target` — that one compares to
+    the *assistant's* prior reply; this one compares to the user's
+    own history.
+    """
+    if not message.strip() or not prior_messages:
+        return False
+    return any(
+        _is_substantively_identical(message, prior)
+        for prior in prior_messages[-_REPETITION_WINDOW:]
+    )
+
+
 def _wrap_target_response(target_response: str) -> str:
     """Prepend a persona reminder to the target's response.
 
@@ -450,6 +583,7 @@ class SimulatedUser:
         *,
         max_turns: int = 15,
         timeout_seconds: float | None = None,
+        opening_validator: Callable[[str], tuple[bool, str]] | None = None,
     ) -> SessionResult:
         """Drive a conversation with *target* until DONE or max_turns.
 
@@ -459,6 +593,16 @@ class SimulatedUser:
         ``target.chat`` / user-LLM call.  ``None`` disables the
         check.  Use this to bound a stuck-or-rambling conversation
         without aborting partway through a single response.
+
+        ``opening_validator`` is an optional callback that receives
+        the user-LLM's opening message and returns
+        ``(is_pass, reasoning)``.  When the callback returns a False
+        result the conversation is aborted before the target sees
+        anything — the typical use is a judge call that detects when
+        the simulated user substituted a different persona than the
+        one it was asked to play.  The reasoning is recorded on
+        :attr:`SessionResult.persona_check_failed` for the calling
+        fixture to surface.  ``None`` skips the check entirely.
 
         Returns a :class:`SessionResult` with the full transcript and
         the paths of any protocol/transcript files that were created.
@@ -471,6 +615,13 @@ class SimulatedUser:
         self._dialogue = []
         self._record("system", system_prompt)
         turns: list[Turn] = []
+        # Recent user messages, for the repetition detector below.
+        # Bounded to ``_REPETITION_WINDOW`` entries so this stays O(1)
+        # per turn even on long runs.
+        prior_user_messages: list[str] = []
+        # Most recent assistant reply, fed to the echo detector.  None
+        # until turn 1 finishes — there's nothing to echo before then.
+        prior_target_response: str | None = None
         stopped_early = False
         timed_out = False
         conversation_start = time.monotonic()
@@ -491,6 +642,42 @@ class SimulatedUser:
         user_msg = self.backend.chat(opening_input, system_prompt=system_prompt)
         self._record("assistant", user_msg)
         _progress(f"turn 1/{max_turns}: user done ({time.monotonic() - t0:.1f}s)")
+
+        # Turn-1 persona-adoption gate.  The validator (typically a
+        # judge call wired up by the fixture) inspects the opening
+        # message and reports whether it inhabits the requested
+        # persona.  A failure here means the simulated user
+        # substituted a different (typically sanitized) persona — we
+        # abort before burning the rest of the turn budget on a run
+        # whose downstream judgments would be meaningless.
+        persona_check_failed: str | None = None
+        if opening_validator is not None:
+            opening_for_check = user_msg.strip()
+            # Strip a leaked reminder if present so the validator
+            # sees the persona's actual opening, not framework noise.
+            opening_for_check, _ = _strip_persona_reminder(opening_for_check)
+            ok, reasoning = opening_validator(opening_for_check)
+            if not ok:
+                _progress(
+                    "turn-1 persona-adoption check FAILED — aborting "
+                    "conversation before target call.  Reason: "
+                    f"{reasoning.strip() or '(no reasoning given)'}"
+                )
+                persona_check_failed = reasoning
+
+        if persona_check_failed is not None:
+            return SessionResult(
+                turns=turns,
+                project_dir=target.project_dir,
+                protocol_dir=target.protocol_dir,
+                transcript_file=target.transcript_file,
+                cost_usd=target.cost_usd,
+                stopped_early=True,
+                timed_out=False,
+                duration_seconds=time.monotonic() - conversation_start,
+                user_llm_dialogue=list(self._dialogue),
+                persona_check_failed=persona_check_failed,
+            )
 
         for i in range(max_turns):
             if _budget_exceeded():
@@ -531,6 +718,19 @@ class SimulatedUser:
                     "dropped out-of-character caveat"
                 )
 
+            # Strip leaked framework persona-reminder text.  When the
+            # user-LLM degrades into "echo my input" mode, the
+            # bracketed reminder we prepend to each turn's input gets
+            # regurgitated verbatim and would otherwise pollute the
+            # user→target transcript.  See persona-robustness-analysis.md.
+            cleaned, reminder_leaked = _strip_persona_reminder(cleaned)
+            if reminder_leaked:
+                _progress(
+                    f"turn {i + 1}/{max_turns}: scrubbed leaked "
+                    "persona-reminder text from user message — strong "
+                    "signal of persona dissolution"
+                )
+
             # Defense in depth for user LLMs that ignore the STATUS
             # protocol but still write a clearly-closing message
             # (regex-detectable farewell at the end).  Only fires when
@@ -543,6 +743,39 @@ class SimulatedUser:
                     "after target's reply"
                 )
                 user_is_done = True
+
+            # Echo detector — terminate if the user-LLM is parroting
+            # back the assistant's prior reply.  Symptom of "no
+            # meaningful content to produce, falling back to copy
+            # input."  See persona-robustness-analysis.md.  Skipped on
+            # turn 1 (no prior_target_response yet) and after the
+            # leaked-reminder scrub already left an empty body (the
+            # empty-body branch below handles that case).
+            if (
+                cleaned
+                and prior_target_response is not None
+                and _is_echo_of_target(cleaned, prior_target_response)
+            ):
+                _progress(
+                    f"turn {i + 1}/{max_turns}: user message echoes "
+                    "the assistant's prior reply — degradation signal, "
+                    "stopping conversation"
+                )
+                stopped_early = True
+                break
+
+            # Repetition detector — terminate if the user-LLM is
+            # producing near-identical messages turn after turn (the
+            # murder_brother_in_law pattern: same opening 15 times in
+            # a row, ignoring the assistant's replies entirely).
+            if cleaned and _is_repetition(cleaned, prior_user_messages):
+                _progress(
+                    f"turn {i + 1}/{max_turns}: user message repeats "
+                    "a recent user message — degradation signal, "
+                    "stopping conversation"
+                )
+                stopped_early = True
+                break
 
             if not cleaned:
                 if user_is_done:
@@ -561,6 +794,15 @@ class SimulatedUser:
                 f"({time.monotonic() - t0:.1f}s)"
             )
             turns.append(Turn(user=cleaned, target=target_response))
+            # Update history for the next turn's degradation
+            # detectors.  Bound prior_user_messages so the list
+            # doesn't grow unbounded on long runs — the repetition
+            # detector only looks at the last _REPETITION_WINDOW
+            # entries anyway.
+            prior_user_messages.append(cleaned)
+            if len(prior_user_messages) > _REPETITION_WINDOW:
+                del prior_user_messages[0]
+            prior_target_response = target_response
 
             if user_is_done:
                 # The user wrapped up.  Target just replied (closing

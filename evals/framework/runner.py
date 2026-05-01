@@ -62,6 +62,7 @@ def run_conversation(
     situation: str = "",
     max_turns: int = 15,
     timeout_seconds: float | None = None,
+    opening_validator: Callable[[str], tuple[bool, str]] | None = None,
 ) -> Iterator[SessionResult]:
     """Run one simulated conversation end-to-end and yield the result.
 
@@ -144,6 +145,7 @@ def run_conversation(
                         target,
                         max_turns=max_turns,
                         timeout_seconds=timeout_seconds,
+                        opening_validator=opening_validator,
                     )
                 except BaseException:
                     # Preserve whatever partial state is on disk —
@@ -598,6 +600,24 @@ def make_conversation_fixture(
                 f"(max {effective_max_turns} turns{timeout_label})"
             )
             _phase(f"Output directory: {project_dir}")
+
+            # Turn-1 persona-adoption gate, run inside converse_with.
+            # The closure routes the live opening message through the
+            # judge so we can abort the run before turn 2 if the
+            # simulated user substituted a sanitized persona.  See
+            # persona-robustness-analysis.md for the failure modes
+            # this catches (and which it doesn't).  The judge's cache
+            # is set up after the conversation completes (see below)
+            # — the live persona check therefore always issues a
+            # fresh judgment, which is the right behavior because the
+            # check only fires on fresh runs (resumes skip
+            # converse_with entirely).
+            def _persona_validator(opening_message: str) -> tuple[bool, str]:
+                return judge.persona_adoption_check(
+                    opening_message,
+                    persona=persona, situation=situation,
+                )
+
             conversation_ctx = run_conversation(
                 eval_config,
                 goal=goal,
@@ -607,6 +627,7 @@ def make_conversation_fixture(
                 project_dir=project_dir,
                 max_turns=effective_max_turns,
                 timeout_seconds=effective_timeout,
+                opening_validator=_persona_validator,
             )
 
         with conversation_ctx as r:
@@ -630,6 +651,27 @@ def make_conversation_fixture(
             )
             judge.set_cache(cache)
             try:
+                # Turn-1 persona-adoption result, if a fresh
+                # converse_with run flagged it.  Surfaces with the
+                # same smoke_failed semantics as the post-conversation
+                # smoke check, but with a more specific reason ("user
+                # never adopted the persona" vs. "conversation didn't
+                # explore the goal").  Resumed conversations carry
+                # ``persona_check_failed=None`` because converse_with
+                # didn't run — the resume path trusts whatever
+                # smoke/persona verdicts were cached previously.
+                if r.persona_check_failed is not None:
+                    reason = r.persona_check_failed
+                    _phase(
+                        f"Persona-adoption check FAILED for {display_slug} — "
+                        "marking module as smoke_failed"
+                    )
+                    raise SmokeCheckFailedError(
+                        f"Persona-adoption check failed for "
+                        f"{display_slug}: {reason}",
+                        reasoning=reason,
+                    )
+
                 # Framework-enforced smoke check: did the conversation
                 # actually explore the user's stated goal?  A NO here
                 # means the simulated user drifted from its persona,

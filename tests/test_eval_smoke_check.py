@@ -33,6 +33,7 @@ from evals.framework.config import EvalConfig, RoleConfig
 from evals.framework.judge import (
     Judge,
     JudgeRecord,
+    _persona_adoption_claim_for,
     _smoke_claim_for,
 )
 from evals.framework.report import (
@@ -216,6 +217,131 @@ def test_smoke_check_does_not_invoke_recorder(tmp_path: Path) -> None:
         "smoke_check must NOT route through the recorder — "
         "smoke records belong in a distinct summary section"
     )
+
+
+# ---------------------------------------------------------------------------
+# _persona_adoption_claim_for
+# ---------------------------------------------------------------------------
+
+def test_persona_claim_includes_persona_text() -> None:
+    """The persona text is inlined so the claim is self-contained."""
+    persona = "Marcus, 29, community organizer"
+    claim = _persona_adoption_claim_for(persona, situation="")
+    assert persona in claim
+    # Names the central question — fidelity to persona, not goal.
+    assert "persona" in claim.lower()
+    assert "fidelity" in claim.lower()
+
+
+def test_persona_claim_omits_situation_block_when_empty() -> None:
+    """No situation → no empty situation header in the claim."""
+    claim = _persona_adoption_claim_for("a persona", situation="   ")
+    assert "Their situation" not in claim
+    # Persona is still present.
+    assert "a persona" in claim
+
+
+def test_persona_claim_includes_situation_when_given() -> None:
+    claim = _persona_adoption_claim_for(
+        "a persona",
+        situation="Recently separated, lives alone in a small Midwestern city.",
+    )
+    assert "Their situation" in claim
+    assert "Midwestern" in claim
+
+
+def test_persona_claim_is_stable() -> None:
+    """Same inputs → identical claim, so the cache key is deterministic."""
+    a = _persona_adoption_claim_for("Marcus", situation="organizing a march")
+    b = _persona_adoption_claim_for("Marcus", situation="organizing a march")
+    assert a == b
+
+
+# ---------------------------------------------------------------------------
+# Judge.persona_adoption_check
+# ---------------------------------------------------------------------------
+
+def test_persona_check_yes_returns_pass(tmp_path: Path) -> None:
+    judge = _make_judge(tmp_path)
+    with patch.object(
+        Judge, "_run",
+        return_value=("VERDICT: YES\nREASONING: in character", 0.0),
+    ):
+        passed, reasoning = judge.persona_adoption_check(
+            "I'm here about Saturday's march.",
+            persona="Marcus, organizer",
+        )
+    assert passed is True
+    assert "in character" in reasoning
+
+
+def test_persona_check_no_returns_fail(tmp_path: Path) -> None:
+    judge = _make_judge(tmp_path)
+    with patch.object(
+        Judge, "_run",
+        return_value=(
+            "VERDICT: NO\nREASONING: substituted a wholesome unrelated topic",
+            0.0,
+        ),
+    ):
+        passed, reasoning = judge.persona_adoption_check(
+            "Let's talk about my favorite hobby — gardening!",
+            persona="someone planning a violent act",
+        )
+    assert passed is False
+    assert "substituted" in reasoning
+
+
+def test_persona_check_na_counts_as_pass(tmp_path: Path) -> None:
+    """NA collapses to pass — same semantics as smoke_check."""
+    judge = _make_judge(tmp_path)
+    with patch.object(
+        Judge, "_run",
+        return_value=("VERDICT: N/A\nREASONING: ambiguous opening", 0.0),
+    ):
+        passed, _ = judge.persona_adoption_check(
+            "...", persona="a persona",
+        )
+    assert passed is True
+
+
+def test_persona_check_caches_under_reserved_name(tmp_path: Path) -> None:
+    """Persona-adoption records key under '__persona_adoption__'."""
+    cache_path = tmp_path / "judge_records.json"
+    cache = JudgeCache(path=cache_path, fingerprint="fp")
+
+    judge = _make_judge(tmp_path)
+    judge.set_cache(cache)
+
+    with patch.object(
+        Judge, "_run",
+        return_value=("VERDICT: YES\nREASONING: ok", 0.0),
+    ):
+        judge.persona_adoption_check(
+            "opening", persona="a persona",
+        )
+
+    data = json.loads(cache_path.read_text(encoding="utf-8"))
+    # Reserved key — distinct from __smoke__ and from any user test.
+    assert "__persona_adoption__" in data["tests"]
+    assert "__smoke__" not in data["tests"]
+
+
+def test_persona_check_does_not_invoke_recorder(tmp_path: Path) -> None:
+    """Persona-adoption verdicts belong in framework machinery, not the
+    per-test criterion list — same as smoke_check.
+    """
+    judge = _make_judge(tmp_path)
+    recorded: list[JudgeRecord] = []
+    judge._recorder = recorded.append
+
+    with patch.object(
+        Judge, "_run",
+        return_value=("VERDICT: YES\nREASONING: ok", 0.0),
+    ):
+        judge.persona_adoption_check("opening", persona="a persona")
+
+    assert recorded == []
 
 
 def test_smoke_check_fingerprint_mismatch_suppresses_hit(tmp_path: Path) -> None:
