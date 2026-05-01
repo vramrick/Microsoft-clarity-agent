@@ -333,12 +333,19 @@ class TestCreateVenv:
 # ---------------------------------------------------------------------------
 
 class TestInstallPythonDeps:
-    def test_ok(self, tmp_path: Path) -> None:
+    def test_ok_with_pip_path(self, tmp_path: Path) -> None:
+        """Without uv on PATH, both pip upgrade and pip install run."""
         venv = tmp_path / ".venv"
         cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        with patch("clarity_agent.setup.installer.subprocess.run", return_value=cp):
+        with patch(
+            "clarity_agent.setup.installer.shutil.which", return_value=None,
+        ), patch(
+            "clarity_agent.setup.installer.subprocess.run", return_value=cp,
+        ):
             results = install_python_deps(tmp_path, venv, ".[dev]")
-        assert all(r.outcome == Outcome.OK for r in results)
+        assert len(results) == 2
+        assert results[0].outcome == Outcome.OK  # pip upgrade
+        assert results[1].outcome == Outcome.OK  # pip install
 
     def test_pip_upgrade_fail_is_warn_not_fail(self, tmp_path: Path) -> None:
         """Pip-upgrade failures don't block the install — venv's bundled
@@ -349,6 +356,8 @@ class TestInstallPythonDeps:
         upgrade_fail = subprocess.CompletedProcess([], 1, stdout="", stderr="err")
         install_ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with patch(
+            "clarity_agent.setup.installer.shutil.which", return_value=None,
+        ), patch(
             "clarity_agent.setup.installer.subprocess.run",
             side_effect=[upgrade_fail, install_ok],
         ):
@@ -370,7 +379,9 @@ class TestInstallPythonDeps:
             [], 1, stdout="", stderr="ResolutionImpossible: ...",
         )
         with patch(
-            "clarity_agent.setup.installer.subprocess.run", side_effect=[ok, fail]
+            "clarity_agent.setup.installer.shutil.which", return_value=None,
+        ), patch(
+            "clarity_agent.setup.installer.subprocess.run", side_effect=[ok, fail],
         ):
             results = install_python_deps(tmp_path, venv, ".[dev]")
         assert any(r.outcome == Outcome.FAIL for r in results)
@@ -378,6 +389,51 @@ class TestInstallPythonDeps:
         assert "pip install" in fail_result.message
         # Captured stderr propagates so the operator sees the real reason.
         assert "ResolutionImpossible" in fail_result.message
+
+    def test_uses_uv_when_available(self, tmp_path: Path) -> None:
+        """When uv is on PATH, use ``uv pip install --python <venv>`` and
+        skip the pip-upgrade step entirely.  This is the path that fixes
+        the "No module named pip" failure on uv-managed venvs (which
+        ship without pip by default).
+        """
+        venv = tmp_path / ".venv"
+        ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch(
+            "clarity_agent.setup.installer.shutil.which", return_value="/usr/local/bin/uv",
+        ), patch(
+            "clarity_agent.setup.installer.subprocess.run", return_value=ok,
+        ) as run_mock:
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+
+        # Only one subprocess call was made (the install) — no upgrade.
+        assert run_mock.call_count == 1
+        cmd = run_mock.call_args.args[0]
+        assert cmd[:3] == ["uv", "pip", "install"]
+        assert "--python" in cmd
+        # The pip-upgrade phase still produces a result, but as SKIP
+        # (no command run, just an explanatory note).
+        assert len(results) == 2
+        assert results[0].outcome == Outcome.SKIP
+        assert results[1].outcome == Outcome.OK
+
+    def test_uv_install_failure_propagates_with_stderr(
+        self, tmp_path: Path,
+    ) -> None:
+        """A uv-install failure surfaces the captured stderr in the FAIL
+        message — same self-diagnosing behavior as the pip path."""
+        venv = tmp_path / ".venv"
+        fail = subprocess.CompletedProcess(
+            [], 1, stdout="", stderr="error: package not found",
+        )
+        with patch(
+            "clarity_agent.setup.installer.shutil.which", return_value="/usr/local/bin/uv",
+        ), patch(
+            "clarity_agent.setup.installer.subprocess.run", return_value=fail,
+        ):
+            results = install_python_deps(tmp_path, venv, ".[dev]")
+        fail_result = next(r for r in results if r.outcome == Outcome.FAIL)
+        assert "uv pip install" in fail_result.message
+        assert "package not found" in fail_result.message
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +620,11 @@ class TestRunInstall:
         url_cp = subprocess.CompletedProcess(
             [], 0, stdout=f"{url}\n", stderr="",
         )
+        # The test sequences subprocess calls precisely; pin the
+        # installer to the pip path (not the uv-pip shortcut) so the
+        # call count matches.  ``which`` returns the npm path for
+        # "npm" but None for everything else (notably "uv").
+        which_results = {"npm": "/usr/bin/npm"}
         with patch("clarity_agent.setup.installer.run_preflight", return_value=ok_preflight), \
              patch("clarity_agent.setup.installer.subprocess.run", side_effect=[
                  url_cp,   # resolve_clone_url
@@ -574,7 +635,10 @@ class TestRunInstall:
                  ok_cp,    # npm install
                  ok_cp,    # npm run build
              ]), \
-             patch("clarity_agent.setup.installer.shutil.which", return_value="/usr/bin/npm"):
+             patch(
+                 "clarity_agent.setup.installer.shutil.which",
+                 side_effect=lambda cmd: which_results.get(cmd),
+             ):
             # Need .clarity-agent/web/package.json for build_web_frontend
             web = tmp_path / CLARITY_DIR / "web"
             web.mkdir(parents=True)

@@ -371,44 +371,69 @@ def install_python_deps(
     venv_dir: Path,
     pip_spec: str,
 ) -> list[StepResult]:
-    """Install Python dependencies via pip.
+    """Install Python dependencies into *venv_dir*.
 
-    Returns a list of :class:`StepResult` because the optional pip
-    upgrade is reported separately from the actual dependency install
-    — the upgrade is a nice-to-have (modern venvs ship a recent
-    enough pip), so its failure becomes a WARN rather than blocking
-    the dependency install that follows.  If that next install hits
-    a problem the bundled pip really can't handle, its own error
-    message will say so.
+    Picks an installer based on what's available, in this order:
+
+    1. ``uv pip install --python <venv-python> -e <spec>`` when ``uv``
+       is on ``$PATH``.  Required when the venv was created by
+       ``uv run`` — uv-made venvs ship without pip by default, so
+       ``python -m pip`` would fail with "No module named pip."  When
+       uv is in play, the explicit "upgrade pip" step is skipped: uv
+       has its own resolver and doesn't depend on pip's version.
+    2. ``<venv-python> -m pip install -e <spec>`` otherwise.  The
+       upgrade-pip step still runs but its failure is now a WARN, not
+       a FAIL — the venv's bundled pip is usually fine, and the
+       dependency install that follows reports a real error if not.
+
+    Returns a list of :class:`StepResult` so each phase (upgrade /
+    install) can be reported separately rather than collapsed into a
+    single misleading message.
     """
     venv_python = _venv_python(venv_dir)
     results: list[StepResult] = []
+    use_uv = shutil.which("uv") is not None
 
-    upgrade = subprocess.run(
-        [venv_python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
-        capture_output=True, text=True, timeout=120,
-    )
-    if upgrade.returncode != 0:
-        # WARN, not FAIL — the venv's bundled pip is usually fine.
-        # Most common cause is a uv-managed Python that lacks pip
-        # entirely ("No module named pip"), in which case the next
-        # step will fail with a clear message of its own anyway.
+    if use_uv:
+        # uv handles its own resolver; no pip upgrade needed (and
+        # would fail anyway on uv venvs that don't ship pip).
         results.append(StepResult(
-            Outcome.WARN,
-            _subprocess_failure(
-                "pip upgrade skipped (continuing with bundled pip)", upgrade,
-            ),
+            Outcome.SKIP,
+            "pip upgrade skipped (using uv pip; not applicable)",
         ))
     else:
-        results.append(StepResult(Outcome.OK, "pip upgraded"))
+        upgrade = subprocess.run(
+            [venv_python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if upgrade.returncode != 0:
+            # WARN, not FAIL — bundled pip is usually fine.
+            results.append(StepResult(
+                Outcome.WARN,
+                _subprocess_failure(
+                    "pip upgrade skipped (continuing with bundled pip)",
+                    upgrade,
+                ),
+            ))
+        else:
+            results.append(StepResult(Outcome.OK, "pip upgraded"))
 
+    if use_uv:
+        install_cmd = [
+            "uv", "pip", "install",
+            "--python", venv_python,
+            "-e", pip_spec,
+        ]
+        installer_label = "uv pip install"
+    else:
+        install_cmd = [venv_python, "-m", "pip", "install", "-e", pip_spec]
+        installer_label = "pip install"
     install = subprocess.run(
-        [venv_python, "-m", "pip", "install", "-e", pip_spec],
-        cwd=cwd, capture_output=True, text=True, timeout=300,
+        install_cmd, cwd=cwd, capture_output=True, text=True, timeout=300,
     )
     if install.returncode != 0:
         results.append(StepResult(
-            Outcome.FAIL, _subprocess_failure("pip install", install),
+            Outcome.FAIL, _subprocess_failure(installer_label, install),
         ))
     else:
         results.append(StepResult(Outcome.OK, "Python dependencies installed"))
