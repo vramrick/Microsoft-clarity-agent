@@ -250,7 +250,7 @@ class TestThinkerSync:
         thinker_files = self._thinker_files()
         if not thinker_files or not README_DEV.exists():
             return
-        readme_text = README_DEV.read_text()
+        readme_text = README_DEV.read_text(encoding="utf-8")
         missing = [
             name for name in sorted(thinker_files)
             if f"{name}.md" not in readme_text
@@ -337,7 +337,7 @@ class TestProcessSync:
         readme_path = PROCESSES_DIR / "README.md"
         if not process_files or not readme_path.exists():
             return
-        readme_text = readme_path.read_text()
+        readme_text = readme_path.read_text(encoding="utf-8")
         missing = [
             name for name in sorted(process_files)
             if f"{name}.md" not in readme_text
@@ -482,7 +482,7 @@ class TestDataDirSync:
         if not self.RUST_SOURCE.exists():
             pytest.skip("src-tauri/src/main.rs not found (not in repo root?)")
 
-        source = self.RUST_SOURCE.read_text()
+        source = self.RUST_SOURCE.read_text(encoding="utf-8")
 
         # Extract the function body.
         fn_start = source.find("fn projects_json_path()")
@@ -506,7 +506,7 @@ class TestDataDirSync:
         if not self.RUST_SOURCE.exists():
             pytest.skip("src-tauri/src/main.rs not found")
 
-        source = self.RUST_SOURCE.read_text()
+        source = self.RUST_SOURCE.read_text(encoding="utf-8")
         # The Rust code should define a ProjectsFile struct with a projects field.
         assert "ProjectsFile" in source, (
             "Rust source must define a ProjectsFile struct to parse the "
