@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
 from clarity_agent.setup.desktop import (
+    _build_tauri,
     _persist_dist,
     _persistence_target,
     run_desktop_install,
@@ -155,6 +157,56 @@ class TestRunDesktopInstall:
         assert Outcome.FAIL not in outcomes
         assert any("Outputs" in r.message or "artifacts" in r.message.lower()
                    for r in results if r.outcome in (Outcome.OK, Outcome.WARN))
+
+
+class TestBuildTauri:
+    """``_build_tauri`` command-line composition."""
+
+    def test_ci_macos_skips_dmg(self, tmp_path: Path) -> None:
+        """In CI on macOS, --bundles app is added to skip the DMG bundle.
+
+        hdiutil DMG creation is unreliable in headless runners so we verify
+        that the flag is injected rather than relying on it working end-to-end.
+        """
+        captured: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs):  # type: ignore[no-untyped-def]
+            captured.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch("clarity_agent.setup.desktop._run_build", side_effect=fake_run), \
+             patch("clarity_agent.setup.desktop._get_target_triple", return_value=""), \
+             patch("clarity_agent.setup.desktop.sys") as mock_sys, \
+             patch.dict(os.environ, {"CI": "true"}):
+            mock_sys.platform = "darwin"
+            _build_tauri(tmp_path, release=True)
+
+        assert captured, "expected _run_build to be called"
+        cmd = captured[0]
+        assert "--bundles" in cmd
+        idx = cmd.index("--bundles")
+        assert cmd[idx + 1] == "app"
+
+    def test_non_ci_macos_does_not_skip_dmg(self, tmp_path: Path) -> None:
+        """Outside CI on macOS, --bundles is not added so Tauri creates all
+        configured bundle types (including DMG for distribution)."""
+        captured: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs):  # type: ignore[no-untyped-def]
+            captured.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        env_without_ci = {k: v for k, v in os.environ.items() if k != "CI"}
+        with patch("clarity_agent.setup.desktop._run_build", side_effect=fake_run), \
+             patch("clarity_agent.setup.desktop._get_target_triple", return_value=""), \
+             patch("clarity_agent.setup.desktop.sys") as mock_sys, \
+             patch.dict(os.environ, env_without_ci, clear=True):
+            mock_sys.platform = "darwin"
+            _build_tauri(tmp_path, release=True)
+
+        assert captured, "expected _run_build to be called"
+        cmd = captured[0]
+        assert "--bundles" not in cmd
 
 
 class TestPersistDist:

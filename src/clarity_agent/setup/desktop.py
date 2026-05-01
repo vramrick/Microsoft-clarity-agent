@@ -275,6 +275,13 @@ def _build_web(source_dir: Path) -> StepResult:
 
 def _build_tauri(source_dir: Path, *, release: bool = False) -> StepResult:
     """Run tauri build to produce the native app bundle."""
+    # Capture whether we are running in CI *before* setdefault mutates the
+    # environment.  setdefault is used solely so the DMG bundler skips
+    # Finder/AppleScript interaction in headless builds; the separate CI
+    # check below uses the *original* env value so local builds still get
+    # all bundle types.
+    _in_ci = bool(os.environ.get("CI"))
+
     # Set CI=true so the DMG bundler skips Finder/AppleScript interaction
     # (which opens windows and can hang in headless environments).
     os.environ.setdefault("CI", "true")
@@ -282,6 +289,13 @@ def _build_tauri(source_dir: Path, *, release: bool = False) -> StepResult:
     cmd = ["npx", "--prefix", str(source_dir / "web"), "tauri", "build"]
     if not release:
         cmd.append("--debug")
+
+    # In CI on macOS, skip the DMG bundle.  hdiutil DMG creation is
+    # unreliable in headless runners (bundle_dmg.sh can fail with no
+    # useful diagnostics), and distribution artifacts are not needed
+    # for build verification.  The .app bundle is sufficient.
+    if _in_ci and sys.platform == "darwin":
+        cmd.extend(["--bundles", "app"])
 
     # Ensure the Tauri build targets the same architecture as the Rust
     # toolchain.  Without this, ARM64 Windows with an x86_64 Rust

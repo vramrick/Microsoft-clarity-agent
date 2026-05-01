@@ -619,10 +619,14 @@ def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
     results: list[StepResult] = []
     venv_python = _venv_python(venv_dir)
 
-    r = subprocess.run(
-        [venv_python, "-m", "pytest", "tests/", "-x", "-q"],
-        cwd=target, capture_output=True, text=True, timeout=300,
-    )
+    try:
+        r = subprocess.run(
+            [venv_python, "-m", "pytest", "tests/", "-x", "-q"],
+            cwd=target, capture_output=True, text=True, timeout=300,
+        )
+    except FileNotFoundError as exc:
+        results.append(StepResult(Outcome.FAIL, f"Python tests: {exc}"))
+        return results
     if r.returncode != 0:
         results.append(StepResult(
             Outcome.FAIL, _subprocess_failure("Python tests", r),
@@ -632,10 +636,16 @@ def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
 
     web_dir = target / "web"
     if (web_dir / "package.json").exists():
-        r = subprocess.run(
-            ["npx", "vitest", "run"],
-            cwd=web_dir, capture_output=True, text=True, timeout=300,
-        )
+        # On Windows, npx is npx.cmd and requires shell=True to resolve.
+        try:
+            r = subprocess.run(
+                ["npx", "vitest", "run"],
+                cwd=web_dir, capture_output=True, text=True, timeout=300,
+                shell=_IS_WINDOWS,
+            )
+        except FileNotFoundError:
+            results.append(StepResult(Outcome.WARN, "npx not found — skipping frontend tests"))
+            return results
         if r.returncode != 0:
             results.append(StepResult(
                 Outcome.FAIL, _subprocess_failure("Frontend tests", r),
@@ -817,7 +827,12 @@ def _cli_main(argv: Sequence[str] | None = None) -> None:
     # -- Auth check & interactive prompt ---------------------------------
     claude_available, claude_logged_in = check_claude_auth()
 
-    if not claude_logged_in:
+    # Skip the interactive auth prompt in CI or when stdin is not a TTY
+    # (e.g. piped input).  The .env file will still be created from
+    # .env.sample by setup_env_file if auth is not configured.
+    _interactive = not os.environ.get("CI") and sys.stdin.isatty()
+
+    if not claude_logged_in and _interactive:
         print()
         if claude_available:
             info("Claude CLI detected but not logged in")
