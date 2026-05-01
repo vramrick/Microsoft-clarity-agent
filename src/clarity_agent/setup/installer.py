@@ -644,12 +644,6 @@ def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
             cwd=target, capture_output=True, text=True, timeout=300,
         )
     except FileNotFoundError as exc:
-<<<<<<< Updated upstream
-        results.append(StepResult(Outcome.FAIL, f"Python tests: {exc}"))
-        return results
-    if r.returncode != 0:
-=======
->>>>>>> Stashed changes
         results.append(StepResult(
             Outcome.FAIL, f"Python tests: interpreter not found ({exc})",
         ))
@@ -663,10 +657,6 @@ def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
 
     web_dir = target / "web"
     if (web_dir / "package.json").exists():
-<<<<<<< Updated upstream
-        # On Windows, npx is npx.cmd and requires shell=True to resolve.
-=======
->>>>>>> Stashed changes
         try:
             r = subprocess.run(
                 ["npx", "vitest", "run"],
@@ -674,12 +664,6 @@ def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
                 shell=_IS_WINDOWS,
             )
         except FileNotFoundError:
-<<<<<<< Updated upstream
-            results.append(StepResult(Outcome.WARN, "npx not found — skipping frontend tests"))
-            return results
-        if r.returncode != 0:
-=======
->>>>>>> Stashed changes
             results.append(StepResult(
                 Outcome.WARN,
                 "npx not found — skipping frontend tests",

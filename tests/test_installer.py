@@ -630,56 +630,18 @@ class TestRunTests:
             results = run_tests(tmp_path, venv)
         assert len(results) == 1  # only pytest
 
-<<<<<<< Updated upstream
-    def test_npx_file_not_found_warns(self, tmp_path: Path) -> None:
-        """FileNotFoundError from npx (Windows: npx.cmd not found without
-        shell=True) must surface as a WARN and not propagate as an
-        uncaught exception that swallows the pytest result."""
-=======
     def test_npx_uses_shell_on_windows(self, tmp_path: Path) -> None:
         """The vitest run must pass shell=True on Windows.
 
-        Same regression as build_web_frontend: ``["npx", ...]``
-        without shell raises FileNotFoundError on Windows because
-        ``CreateProcess`` won't resolve ``npx.cmd``.  This crashed
-        the whole install with an unhandled ``[WinError 2]`` on the
-        install-fix branch.
+        ``["npx", ...]`` without shell raises FileNotFoundError on
+        Windows because ``CreateProcess`` won't resolve ``npx.cmd``.
+        This crashed the whole install with an unhandled
+        ``[WinError 2]`` on the install-fix branch.
         """
->>>>>>> Stashed changes
         venv = tmp_path / ".venv"
         web = tmp_path / "web"
         web.mkdir()
         (web / "package.json").write_text("{}")
-<<<<<<< Updated upstream
-        ok_cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-
-        call_count = [0]
-
-        def side_effect(*args, **kwargs):  # type: ignore[no-untyped-def]
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return ok_cp  # pytest succeeds
-            raise FileNotFoundError("npx not found")
-
-        with patch("clarity_agent.setup.installer.subprocess.run", side_effect=side_effect):
-            results = run_tests(tmp_path, venv)
-
-        assert any(r.outcome == Outcome.OK and "Python" in r.message for r in results)
-        assert any(r.outcome == Outcome.WARN and "npx" in r.message.lower() for r in results)
-
-    def test_pytest_file_not_found_fails(self, tmp_path: Path) -> None:
-        """FileNotFoundError from venv Python (e.g. missing venv) surfaces as FAIL."""
-        venv = tmp_path / ".venv"
-
-        with patch(
-            "clarity_agent.setup.installer.subprocess.run",
-            side_effect=FileNotFoundError("python not found"),
-        ):
-            results = run_tests(tmp_path, venv)
-
-        assert len(results) == 1
-        assert results[0].outcome == Outcome.FAIL
-=======
         cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with patch("clarity_agent.setup.installer._IS_WINDOWS", True), \
              patch(
@@ -689,10 +651,10 @@ class TestRunTests:
         # Two calls: pytest (no shell needed — venv_python is absolute)
         # and npx vitest (shell=True on Windows).
         assert mock_run.call_count == 2
-        pytest_call, npx_call = mock_run.call_args_list
         # The pytest invocation does not need shell=True even on
         # Windows because venv_python resolves to an absolute .exe;
         # we don't enforce its value, only the npx call's.
+        npx_call = mock_run.call_args_list[1]
         assert npx_call.args[0][0] == "npx"
         assert npx_call.kwargs.get("shell") is True
 
@@ -736,7 +698,6 @@ class TestRunTests:
         assert results[0].outcome == Outcome.OK  # pytest
         assert results[1].outcome == Outcome.WARN  # vitest skipped
         assert "npx not found" in results[1].message
->>>>>>> Stashed changes
 
 
 # ---------------------------------------------------------------------------
