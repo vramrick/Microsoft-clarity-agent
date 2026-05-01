@@ -481,6 +481,47 @@ class TestBuildWebFrontend:
                 r = build_web_frontend(tmp_path)
         assert r.outcome == Outcome.OK
 
+    def test_passes_shell_true_on_windows(self, tmp_path: Path) -> None:
+        """On Windows, npm calls must use shell=True to resolve npm.cmd.
+
+        Bare ``CreateProcess`` with ``["npm", ...]`` won't find the
+        ``.cmd`` shim — Python's ``subprocess`` only resolves ``.exe``
+        unless ``shell=True`` routes the invocation through cmd.exe.
+        Regression test for the Windows ``[WinError 2]`` install
+        failure on the install-fix branch.
+        """
+        (tmp_path / "package.json").write_text("{}")
+        cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("clarity_agent.setup.installer._IS_WINDOWS", True), \
+             patch("clarity_agent.setup.installer.shutil.which", return_value="C:\\npm.cmd"), \
+             patch(
+                 "clarity_agent.setup.installer.subprocess.run", return_value=cp,
+             ) as mock_run:
+            build_web_frontend(tmp_path)
+        # Both npm install and npm run build must pass shell=True.
+        assert mock_run.call_count == 2
+        for call in mock_run.call_args_list:
+            assert call.kwargs.get("shell") is True, (
+                f"npm subprocess on Windows must pass shell=True, got {call.kwargs}"
+            )
+
+    def test_no_shell_on_non_windows(self, tmp_path: Path) -> None:
+        """Inverse: on Mac/Linux, shell=True would be wrong — without
+        shell, the args list is execed directly, which is the safe
+        and idiomatic path on POSIX."""
+        (tmp_path / "package.json").write_text("{}")
+        cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("clarity_agent.setup.installer._IS_WINDOWS", False), \
+             patch("clarity_agent.setup.installer.shutil.which", return_value="/usr/bin/npm"), \
+             patch(
+                 "clarity_agent.setup.installer.subprocess.run", return_value=cp,
+             ) as mock_run:
+            build_web_frontend(tmp_path)
+        for call in mock_run.call_args_list:
+            assert call.kwargs.get("shell") is False, (
+                f"npm subprocess on POSIX must not use shell=True, got {call.kwargs}"
+            )
+
 
 # ---------------------------------------------------------------------------
 # setup_env_file
@@ -589,14 +630,27 @@ class TestRunTests:
             results = run_tests(tmp_path, venv)
         assert len(results) == 1  # only pytest
 
+<<<<<<< Updated upstream
     def test_npx_file_not_found_warns(self, tmp_path: Path) -> None:
         """FileNotFoundError from npx (Windows: npx.cmd not found without
         shell=True) must surface as a WARN and not propagate as an
         uncaught exception that swallows the pytest result."""
+=======
+    def test_npx_uses_shell_on_windows(self, tmp_path: Path) -> None:
+        """The vitest run must pass shell=True on Windows.
+
+        Same regression as build_web_frontend: ``["npx", ...]``
+        without shell raises FileNotFoundError on Windows because
+        ``CreateProcess`` won't resolve ``npx.cmd``.  This crashed
+        the whole install with an unhandled ``[WinError 2]`` on the
+        install-fix branch.
+        """
+>>>>>>> Stashed changes
         venv = tmp_path / ".venv"
         web = tmp_path / "web"
         web.mkdir()
         (web / "package.json").write_text("{}")
+<<<<<<< Updated upstream
         ok_cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
         call_count = [0]
@@ -625,6 +679,64 @@ class TestRunTests:
 
         assert len(results) == 1
         assert results[0].outcome == Outcome.FAIL
+=======
+        cp = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("clarity_agent.setup.installer._IS_WINDOWS", True), \
+             patch(
+                 "clarity_agent.setup.installer.subprocess.run", return_value=cp,
+             ) as mock_run:
+            run_tests(tmp_path, venv)
+        # Two calls: pytest (no shell needed — venv_python is absolute)
+        # and npx vitest (shell=True on Windows).
+        assert mock_run.call_count == 2
+        pytest_call, npx_call = mock_run.call_args_list
+        # The pytest invocation does not need shell=True even on
+        # Windows because venv_python resolves to an absolute .exe;
+        # we don't enforce its value, only the npx call's.
+        assert npx_call.args[0][0] == "npx"
+        assert npx_call.kwargs.get("shell") is True
+
+    def test_pytest_missing_interpreter_does_not_crash(
+        self, tmp_path: Path,
+    ) -> None:
+        """Broken venv → FAIL StepResult, not unhandled exception.
+
+        Before the fix, ``subprocess.run`` raising FileNotFoundError
+        for a missing ``.venv/bin/python`` propagated all the way out
+        of ``run_install`` and crashed the install script.  Now it
+        surfaces as a normal FAIL the orchestrator can format.
+        """
+        venv = tmp_path / ".venv"
+        with patch(
+            "clarity_agent.setup.installer.subprocess.run",
+            side_effect=FileNotFoundError("no such file"),
+        ):
+            results = run_tests(tmp_path, venv)
+        assert len(results) == 1
+        assert results[0].outcome == Outcome.FAIL
+        assert "interpreter not found" in results[0].message
+
+    def test_npx_missing_does_not_crash(self, tmp_path: Path) -> None:
+        """Missing npx → WARN, not unhandled exception.
+
+        Defensive companion to the pytest case — pytest passes,
+        npx is missing, install proceeds with a warning.
+        """
+        venv = tmp_path / ".venv"
+        web = tmp_path / "web"
+        web.mkdir()
+        (web / "package.json").write_text("{}")
+        ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch(
+            "clarity_agent.setup.installer.subprocess.run",
+            side_effect=[ok, FileNotFoundError("npx missing")],
+        ):
+            results = run_tests(tmp_path, venv)
+        assert len(results) == 2
+        assert results[0].outcome == Outcome.OK  # pytest
+        assert results[1].outcome == Outcome.WARN  # vitest skipped
+        assert "npx not found" in results[1].message
+>>>>>>> Stashed changes
 
 
 # ---------------------------------------------------------------------------

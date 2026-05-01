@@ -441,7 +441,15 @@ def install_python_deps(
 
 
 def build_web_frontend(web_dir: Path) -> StepResult:
-    """Run npm install + build in the given web directory."""
+    """Run npm install + build in the given web directory.
+
+    On Windows, ``npm`` ships as ``npm.cmd``; ``subprocess.run(["npm",
+    ...])`` without ``shell=True`` calls ``CreateProcess`` directly,
+    which only resolves ``.exe`` — so the bare-list call raises
+    ``FileNotFoundError`` even when ``shutil.which("npm")`` succeeded
+    (since ``shutil.which`` honors ``PATHEXT``).  Pass ``shell=True``
+    on Windows so ``cmd.exe`` resolves the ``.cmd`` shim.
+    """
     if not (web_dir / "package.json").exists():
         return StepResult(Outcome.SKIP, "web/package.json not found")
     if not shutil.which("npm"):
@@ -453,6 +461,7 @@ def build_web_frontend(web_dir: Path) -> StepResult:
         r = subprocess.run(
             ["npm", "install"], cwd=web_dir,
             capture_output=True, text=True, timeout=120,
+            shell=_IS_WINDOWS,
         )
     except FileNotFoundError:
         return StepResult(
@@ -465,6 +474,7 @@ def build_web_frontend(web_dir: Path) -> StepResult:
         r = subprocess.run(
             ["npm", "run", "build"], cwd=web_dir,
             capture_output=True, text=True, timeout=120,
+            shell=_IS_WINDOWS,
         )
     except FileNotFoundError:
         return StepResult(
@@ -615,7 +625,16 @@ def insert_agent_snippet(target: Path, agent_dir: Path) -> StepResult:
 
 
 def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
-    """Run pytest and vitest.  Only used in dev mode."""
+    """Run pytest and vitest.  Only used in dev mode.
+
+    Both subprocess calls are wrapped in ``FileNotFoundError`` handlers
+    so a missing interpreter (broken venv) or missing ``npx`` shim
+    surfaces as a FAIL StepResult instead of crashing the whole
+    install with an unhandled ``WinError 2`` / ``ENOENT``.  The npx
+    call also passes ``shell=True`` on Windows — same reason as
+    :func:`build_web_frontend` (bare ``CreateProcess`` won't resolve
+    ``npx.cmd``).
+    """
     results: list[StepResult] = []
     venv_python = _venv_python(venv_dir)
 
@@ -625,18 +644,29 @@ def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
             cwd=target, capture_output=True, text=True, timeout=300,
         )
     except FileNotFoundError as exc:
+<<<<<<< Updated upstream
         results.append(StepResult(Outcome.FAIL, f"Python tests: {exc}"))
         return results
     if r.returncode != 0:
+=======
+>>>>>>> Stashed changes
         results.append(StepResult(
-            Outcome.FAIL, _subprocess_failure("Python tests", r),
+            Outcome.FAIL, f"Python tests: interpreter not found ({exc})",
         ))
     else:
-        results.append(StepResult(Outcome.OK, "Python tests passed"))
+        if r.returncode != 0:
+            results.append(StepResult(
+                Outcome.FAIL, _subprocess_failure("Python tests", r),
+            ))
+        else:
+            results.append(StepResult(Outcome.OK, "Python tests passed"))
 
     web_dir = target / "web"
     if (web_dir / "package.json").exists():
+<<<<<<< Updated upstream
         # On Windows, npx is npx.cmd and requires shell=True to resolve.
+=======
+>>>>>>> Stashed changes
         try:
             r = subprocess.run(
                 ["npx", "vitest", "run"],
@@ -644,14 +674,23 @@ def run_tests(target: Path, venv_dir: Path) -> list[StepResult]:
                 shell=_IS_WINDOWS,
             )
         except FileNotFoundError:
+<<<<<<< Updated upstream
             results.append(StepResult(Outcome.WARN, "npx not found — skipping frontend tests"))
             return results
         if r.returncode != 0:
+=======
+>>>>>>> Stashed changes
             results.append(StepResult(
-                Outcome.FAIL, _subprocess_failure("Frontend tests", r),
+                Outcome.WARN,
+                "npx not found — skipping frontend tests",
             ))
         else:
-            results.append(StepResult(Outcome.OK, "Frontend tests passed"))
+            if r.returncode != 0:
+                results.append(StepResult(
+                    Outcome.FAIL, _subprocess_failure("Frontend tests", r),
+                ))
+            else:
+                results.append(StepResult(Outcome.OK, "Frontend tests passed"))
 
     return results
 
