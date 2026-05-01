@@ -280,7 +280,8 @@ def _build_tauri(source_dir: Path, *, release: bool = False) -> StepResult:
     # Finder/AppleScript interaction in headless builds; the separate CI
     # check below uses the *original* env value so local builds still get
     # all bundle types.
-    _in_ci = bool(os.environ.get("CI"))
+    # Use an explicit check so that CI=false / CI=0 is treated as non-CI.
+    _in_ci = os.environ.get("CI", "").lower() in ("1", "true", "yes")
 
     # Set CI=true so the DMG bundler skips Finder/AppleScript interaction
     # (which opens windows and can hang in headless environments).

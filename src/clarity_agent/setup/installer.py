@@ -830,7 +830,9 @@ def _cli_main(argv: Sequence[str] | None = None) -> None:
     # Skip the interactive auth prompt in CI or when stdin is not a TTY
     # (e.g. piped input).  The .env file will still be created from
     # .env.sample by setup_env_file if auth is not configured.
-    _interactive = not os.environ.get("CI") and sys.stdin.isatty()
+    # Use an explicit check so that CI=false / CI=0 is treated as non-CI.
+    _in_ci = os.environ.get("CI", "").lower() in ("1", "true", "yes")
+    _interactive = not _in_ci and sys.stdin.isatty()
 
     if not claude_logged_in and _interactive:
         print()
