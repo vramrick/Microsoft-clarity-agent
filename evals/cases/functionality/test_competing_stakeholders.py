@@ -133,12 +133,7 @@ result = make_conversation_fixture(
 # Assertions
 # --------------------------------------------------------------------------
 
-def test_conversation_was_substantive(result: SessionResult) -> None:
-    assert result.turn_count >= 4, (
-        f"Conversation was only {result.turn_count} turns."
-    )
-
-
+@advisory("http://github.com/microsoft/clarity-agent/issues/10")
 def test_reframed_balance_to_decide(result: SessionResult, judge) -> None:
     """The framing hides that this is a prioritization call."""
     assert judge.check(

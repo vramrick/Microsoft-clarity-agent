@@ -215,7 +215,8 @@ def _load_module_metadata(
 # converse_with), smoke check runs after the conversation completes.
 _SMOKE_GATE_KEYS: list[tuple[str, str]] = [
     ("__persona_adoption__", "persona-adoption check"),
-    ("__smoke__", "smoke check"),
+    ("__substantivity__", "substantivity check"),
+    ("__goal_pursued__", "goal-pursued check"),
 ]
 
 
@@ -274,7 +275,7 @@ def _smoke_anchor(folder_rel: str, reserved_name: str) -> str:
 
     Format: ``smoke-<category>-<module>-<reserved>``.  Distinct from
     test anchors (which use the user-facing function name) so the
-    namespaces don't collide.  ``__smoke__`` becomes ``smoke``,
+    namespaces don't collide.  ``__goal_pursued__`` becomes ``smoke``,
     ``__persona_adoption__`` becomes ``persona-adoption`` for
     readable URLs.
     """
@@ -296,7 +297,7 @@ def _failing_gate_label(
 
     Strips the trailing " check" from the label so it reads
     naturally with the "gate" suffix the heading appends — the full
-    label "smoke check" + " gate failed" reads as "smoke check gate
+    label "goal-pursued check" + " gate failed" reads as "smoke check gate
     failed" which is redundant; the short form "smoke gate failed"
     is what we want.
     """
@@ -309,36 +310,32 @@ def _failing_gate_label(
 def _aggregate_smoke_gate_verdicts(
     outputs_dir: Path,
     folder_rels: list[str],
-) -> dict[str, int]:
-    """Tally smoke-gate verdicts across the given modules.
+) -> dict[str, dict[str, int]]:
+    """Tally smoke-gate verdicts across the given modules, per-gate.
 
-    Returns ``{"passed": N, "persona_adoption_failed": N,
-    "smoke_failed": N}`` — the gate-level counterpart to the
-    test-level outcome counts.  Distinct because user tests roll up
-    differently: one gate failure → multiple deferred user tests,
-    so a per-test count of "smoke-failed" misrepresents how many
-    actual gates fired.
+    Returns a nested ``{reserved_name: {"passed": N, "failed": N}}``
+    so the report can render one line per gate type rather than
+    lumping the two gates' verdicts under a shared "passed" count
+    (which made it ambiguous which check actually passed).  The
+    outer keys are ``"__persona_adoption__"`` and ``"__goal_pursued__"``,
+    mirroring :data:`_SMOKE_GATE_KEYS`.
 
-    Modules whose cache file isn't on disk yet (in-flight, crashed
-    early) contribute nothing — gate counts only reflect what
-    actually ran.
+    Each module contributes at most 1 to each gate's counts (it has
+    one record per gate at most).  Modules whose cache file isn't
+    on disk yet, or whose persona-adoption gate was skipped on a
+    resume, contribute nothing for that gate.
     """
-    counts: dict[str, int] = {
-        "passed": 0,
-        "persona_adoption_failed": 0,
-        "smoke_failed": 0,
+    counts: dict[str, dict[str, int]] = {
+        reserved_name: {"passed": 0, "failed": 0}
+        for reserved_name, _ in _SMOKE_GATE_KEYS
     }
     for folder_rel in folder_rels:
         records = _load_smoke_gate_records(outputs_dir, folder_rel)
         for reserved_name, _label, rec in records:
             if rec is None:
                 continue
-            if rec.verdict in ("YES", "NA"):
-                counts["passed"] += 1
-            elif reserved_name == "__persona_adoption__":
-                counts["persona_adoption_failed"] += 1
-            elif reserved_name == "__smoke__":
-                counts["smoke_failed"] += 1
+            bucket = "passed" if rec.verdict in ("YES", "NA") else "failed"
+            counts[reserved_name][bucket] += 1
     return counts
 
 
@@ -552,19 +549,21 @@ def write_summary(
         "passed": 0, "failed": 0, "skipped": 0,
         "error": 0, "smoke_failed": 0, "advisory_failed": 0,
     }
-    for outcome in test_outcomes.values():
+    # Number of *tests* that returned at least one N/A verdict.
+    # Distinct from ``total_na`` (criterion-level count) — the
+    # top-line bucket counts tests that had any N/A criterion, not
+    # how many criteria returned N/A.  These tests still PASSED
+    # (N/A verdicts don't fail a test); we surface them as a
+    # sub-category of "passing" because "criterion didn't apply"
+    # is meaningfully different from "criterion fired YES".
+    tests_with_na = 0
+    for nodeid, outcome in test_outcomes.items():
         key = outcome.get("outcome", "error")
         counts[key] = counts.get(key, 0) + 1
-
-    # Criterion-level: total NA verdicts across all judge calls.  A
-    # separate bucket from test outcomes — N/A is the "doesn't apply"
-    # signal for conditional criteria, not a test outcome of its own.
-    total_na = sum(
-        1
-        for recs in judge_records.values()
-        for rec in recs
-        if rec.verdict == "NA"
-    )
+        if key == "passed" and any(
+            rec.verdict == "NA" for rec in judge_records.get(nodeid, [])
+        ):
+            tests_with_na += 1
 
     # Tests that have judge records but no outcome yet are in flight
     # (pytest entered the test but makereport hasn't recorded a
@@ -575,36 +574,10 @@ def write_summary(
         if tid not in test_outcomes and tid != "<unknown>"
     )
 
-    total = len(test_outcomes)
-    summary_line = f"**{total} test{'s' if total != 1 else ''}**"
-    if counts["passed"]:
-        summary_line += f" · {counts['passed']} passed"
-    if counts["failed"]:
-        summary_line += f" · **{counts['failed']} failed**"
-    if counts["skipped"]:
-        summary_line += f" · {counts['skipped']} skipped"
-    if counts["error"]:
-        summary_line += f" · {counts['error']} errored"
-    if counts["smoke_failed"]:
-        # Bold this one — smoke failure means entire modules' samples
-        # are invalid, which is worth surfacing prominently.
-        summary_line += f" · **{counts['smoke_failed']} smoke-failed**"
-    if counts["advisory_failed"]:
-        # Not bolded — advisory failures are by design informational
-        # and don't block the suite.  Surfaced so a reviewer sees
-        # the count at a glance and can prioritize accordingly.
-        summary_line += (
-            f" · {counts['advisory_failed']} advisory-failed"
-        )
-    if running_ids:
-        summary_line += f" · {len(running_ids)} running"
-
-    # Gate-level summary line.  The test-level counts above lump
-    # every deferred test into "smoke-failed" without showing which
-    # gate actually fired; this line breaks that out so a reviewer
-    # can tell at-a-glance whether the failure was at turn-1
-    # persona-adoption or at the post-conversation goal-exploration
-    # smoke check.  Aggregated across all modules.
+    # Smoke-gate aggregation, used for both the per-gate detail
+    # lines below AND for rolling smoke-gate passes into the
+    # top-level "OK" bucket and smoke-gate failures into the
+    # top-level "no meaningful results" bucket.
     folder_rels_for_gates = sorted({
         _parse_nodeid(n)["folder_rel"]
         for n in test_outcomes
@@ -613,31 +586,106 @@ def write_summary(
     gate_counts = _aggregate_smoke_gate_verdicts(
         outputs_dir, folder_rels_for_gates,
     )
-    total_gates = (
-        gate_counts["passed"]
-        + gate_counts["persona_adoption_failed"]
-        + gate_counts["smoke_failed"]
-    )
-    if total_na:
-        summary_line += f" · {total_na} criteria N/A"
-    lines.append(summary_line)
 
-    # Render the gate-level summary as a second top-line.  Only
-    # emitted when at least one gate verdict was recorded — skips
-    # cleanly on suite invocations that ran no real conversations
-    # (e.g. import-time errors, --collect-only).
-    if total_gates:
-        gate_line = (
-            f"**{total_gates} smoke gate{'s' if total_gates != 1 else ''}**"
+    # Three test-level outcome buckets, designed to answer "would
+    # this run block a launch?" at a glance.  Smoke-gate verdicts
+    # are NOT rolled in here — they're a separate axis (the
+    # per-gate breakdown lines below cover them).  Mixing them
+    # would conflate "are user tests passing?" with "is the
+    # framework's smoke machinery working?", which are different
+    # questions:
+    #
+    #   OK       — produced a launch-OK signal: the test passed,
+    #              or it failed-but-was-marked-advisory (which by
+    #              design doesn't block).  Tests with N/A verdicts
+    #              are a sub-category of passing — they passed but
+    #              had at least one criterion that didn't apply.
+    #   FAILED   — produced a real blocking failure (a test
+    #              assertion that would normally fail the suite).
+    #              Advisory failures are NOT here — by design.
+    #   NO SIGNAL — produced no meaningful pass/fail signal: an
+    #              infra error, a smoke-gate-deferred test (the
+    #              conversation didn't probe what we wanted), or
+    #              an explicit skip.
+    test_passes_clean = counts["passed"] - tests_with_na
+    ok_count = counts["passed"] + counts["advisory_failed"]
+    failed_count = counts["failed"]
+    no_signal_count = (
+        counts["error"]
+        + counts["smoke_failed"]
+        + counts["skipped"]
+    )
+
+    # Render the bullets.  Each bucket is its own line so a
+    # reviewer can see the answer to "what should I worry about?"
+    # without parsing a fused summary line.  Sub-categories appear
+    # in parens; we skip parens entirely if a sub-category is 0 to
+    # avoid noise like "(70 passing · 0 N/A · 0 advisory failures)".
+    ok_parts: list[str] = []
+    if test_passes_clean:
+        ok_parts.append(f"{test_passes_clean} passing")
+    if tests_with_na:
+        ok_parts.append(f"{tests_with_na} N/A")
+    if counts["advisory_failed"]:
+        ok_parts.append(
+            f"{counts['advisory_failed']} advisory failures"
         )
-        if gate_counts["passed"]:
-            gate_line += f" · {gate_counts['passed']} passed"
-        if gate_counts["persona_adoption_failed"]:
-            n = gate_counts["persona_adoption_failed"]
-            gate_line += f" · **{n} persona-adoption failed**"
-        if gate_counts["smoke_failed"]:
-            n = gate_counts["smoke_failed"]
-            gate_line += f" · **{n} smoke check failed**"
+    ok_line = f"- **{ok_count} OK**"
+    if ok_parts:
+        ok_line += f" ({' · '.join(ok_parts)})"
+    lines.append(ok_line)
+
+    if failed_count:
+        # Bold the failed line — this is the one that blocks a
+        # launch.  Reviewer should see it before they see anything
+        # else.
+        lines.append(f"- **{failed_count} failed**")
+
+    if no_signal_count:
+        no_signal_parts: list[str] = []
+        if counts["error"]:
+            no_signal_parts.append(f"{counts['error']} errored")
+        if counts["smoke_failed"]:
+            no_signal_parts.append(
+                f"{counts['smoke_failed']} deferred from "
+                "failed smoke checks"
+            )
+        if counts["skipped"]:
+            no_signal_parts.append(f"{counts['skipped']} skipped")
+        line = f"- **{no_signal_count} no signal**"
+        if no_signal_parts:
+            line += f" ({' · '.join(no_signal_parts)})"
+        lines.append(line)
+
+    if running_ids:
+        # In-flight tests — pytest entered them but didn't finish.
+        # Surfaces interrupted-run state so a reviewer skimming the
+        # summary sees what was mid-flight.
+        lines.append(f"- {len(running_ids)} still running")
+
+    # Per-gate summary lines — one line per gate type, in run order
+    # (persona-adoption first, smoke second).  Splitting them out
+    # rather than collapsing into a shared "smoke gates" line means
+    # a reader can see at-a-glance which check passed and which
+    # failed — they shouldn't have to parse "1 passed" against
+    # "1 persona-adoption failed" to deduce that the smoke check
+    # was the one that passed.  Skips a line if its gate has no
+    # records (e.g. resumed runs skip persona-adoption entirely).
+    for reserved_name, label in _SMOKE_GATE_KEYS:
+        gate = gate_counts[reserved_name]
+        total = gate["passed"] + gate["failed"]
+        if not total:
+            continue
+        # Capitalize the first character of the label for the line
+        # heading — labels are stored lowercase ("persona-adoption
+        # check") so they read naturally inside sentences, but here
+        # they start a top-level summary line.
+        heading = label[:1].upper() + label[1:]
+        gate_line = (
+            f"**{heading}:** {gate['passed']}/{total} passed"
+        )
+        if gate["failed"]:
+            gate_line += f" · **{gate['failed']} failed**"
         lines.append(gate_line)
     lines.append("")
 

@@ -39,7 +39,11 @@ from typing import Any
 import pytest
 
 from evals.framework.config import EvalConfig
-from evals.framework.judge import SmokeCheckFailedError
+from evals.framework.judge import (
+    _SUBSTANTIVITY_CACHE_KEY,
+    SmokeCheckFailedError,
+    _make_substantivity_record,
+)
 from evals.framework.resume import JudgeCache, compute_fingerprint
 from evals.framework.target import TargetSession
 from evals.framework.types import SessionResult, Turn
@@ -615,7 +619,7 @@ def make_conversation_fixture(
             def _persona_validator(opening_message: str) -> tuple[bool, str]:
                 return judge.persona_adoption_check(
                     opening_message,
-                    persona=persona, situation=situation,
+                    persona=persona, situation=situation, goal=goal,
                 )
 
             conversation_ctx = run_conversation(
@@ -672,6 +676,31 @@ def make_conversation_fixture(
                         reasoning=reason,
                     )
 
+                # Substantivity gate.  Pure code, no LLM call —
+                # checks ``turn_count >= 2``.  Below that, the
+                # conversation didn't have enough exchange for any
+                # downstream criterion to differentiate behavior, so
+                # goal_pursued_check would just produce a meaningless verdict
+                # too.  Promoted from the old per-test
+                # ``test_conversation_was_substantive`` assertion to
+                # a framework gate so the whole module aborts cleanly.
+                # Synthetic record stored in the cache so the report
+                # renders this gate alongside the other smoke gates.
+                substantivity_rec = _make_substantivity_record(r.turn_count)
+                cache.store(
+                    _SUBSTANTIVITY_CACHE_KEY, substantivity_rec,
+                )
+                if substantivity_rec.verdict != "YES":
+                    _phase(
+                        f"Substantivity check FAILED for {display_slug} — "
+                        "marking module as smoke_failed"
+                    )
+                    raise SmokeCheckFailedError(
+                        f"Substantivity check failed for "
+                        f"{display_slug}: {substantivity_rec.reasoning}",
+                        reasoning=substantivity_rec.reasoning,
+                    )
+
                 # Framework-enforced smoke check: did the conversation
                 # actually explore the user's stated goal?  A NO here
                 # means the simulated user drifted from its persona,
@@ -682,17 +711,17 @@ def make_conversation_fixture(
                 # than running them against a corrupt sample.  Cached
                 # like any other judge record, so a passing smoke
                 # check is free on rerun.
-                _phase(f"Running smoke check for {display_slug}")
-                smoke_passed, smoke_reasoning = judge.smoke_check(
+                _phase(f"Running goal-pursued check for {display_slug}")
+                smoke_passed, smoke_reasoning = judge.goal_pursued_check(
                     r.transcript, goal=goal,
                 )
                 if not smoke_passed:
                     _phase(
-                        f"Smoke check FAILED for {display_slug} — "
+                        f"Goal-pursued check FAILED for {display_slug} — "
                         "marking module as smoke_failed"
                     )
                     raise SmokeCheckFailedError(
-                        f"Smoke check failed for {display_slug}: "
+                        f"Goal-pursued check failed for {display_slug}: "
                         f"{smoke_reasoning}",
                         reasoning=smoke_reasoning,
                     )

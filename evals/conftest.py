@@ -434,7 +434,7 @@ def _classify_error(call) -> str:
 def _extract_smoke_reasoning(call) -> str | None:
     """Pull the judge's reasoning off a SmokeCheckFailedError, if any.
 
-    Stored on the exception by ``Judge.smoke_check`` so the summary
+    Stored on the exception by ``Judge.goal_pursued_check`` so the summary
     can render WHY the smoke check failed, not just that it did.
     """
     if call is None or call.excinfo is None:

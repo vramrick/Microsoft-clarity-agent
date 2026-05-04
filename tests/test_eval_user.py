@@ -430,6 +430,70 @@ def test_system_prompt_pins_who_is_who() -> None:
     assert "Clarity Agent" in prompt
 
 
+def test_system_prompt_includes_pre_closure_goal_check() -> None:
+    """The closure section tells the LLM to verify goal coverage
+    before signaling CLOSING/DONE.
+
+    Regression test for the test_career_pivot pattern (2026-05-01),
+    where the user-LLM signed off enthusiastically after the
+    assistant addressed only some of the goal's items.  The check
+    explicitly walks the LLM through (1) goal coverage, (2)
+    situation-detail reveals, (3) persona pushback before allowing
+    a clean close.
+    """
+    user, _ = _make_user(["opening"])
+    prompt = user._build_system_prompt()
+    # The pre-closure check section is present and ordered ahead of
+    # the "when to actually close" section so the LLM reads them in
+    # logical order.
+    pre_idx = prompt.find("Before you signal CLOSING or DONE")
+    when_idx = prompt.find("When to actually signal CLOSING or DONE")
+    assert pre_idx >= 0, "missing pre-closure goal-check section"
+    assert when_idx >= 0, "missing 'when to close' section"
+    assert pre_idx < when_idx, (
+        "the checklist must come before the 'when to close' guidance "
+        "so the LLM evaluates coverage first"
+    )
+    # All three checks are spelled out.
+    assert "meaningful answers to each item" in prompt
+    assert "situation details I was supposed to share" in prompt
+    assert "as my persona would" in prompt
+
+
+def test_system_prompt_warns_against_premature_closing() -> None:
+    """Explicit "premature close = common failure mode" framing.
+
+    Tells the LLM to bias toward asking another question when in
+    doubt, rather than wrapping up.  Without this phrasing the LLM
+    treats every check-item as a soft suggestion; with it, the
+    default tilts toward continuing.
+    """
+    user, _ = _make_user(["opening"])
+    prompt = user._build_system_prompt()
+    assert "Closing prematurely" in prompt
+    assert "when in doubt, ask the next question" in prompt
+
+
+def test_system_prompt_acknowledges_calibrated_refusal_carve_out() -> None:
+    """The pre-closure check must NOT push the LLM to grind against
+    a firmly-refused request.
+
+    Threads the needle with the test_fraud_explicit fix: the
+    persona is supposed to bow out cleanly when the assistant has
+    refused, not keep retrying.  If we told the LLM "always cover
+    every goal item" without this carve-out, it would grind on
+    refusals — exactly the failure mode test_fraud_explicit's
+    GOAL was just rewritten to avoid.
+    """
+    user, _ = _make_user(["opening"])
+    prompt = user._build_system_prompt()
+    # The "when to close" section explicitly lists "firmly refused"
+    # as a valid termination condition.
+    assert "firmly refused" in prompt
+    assert "calibrated refusal" in prompt
+    assert "grinding" in prompt or "grind" in prompt
+
+
 def test_persona_reminder_names_both_sides() -> None:
     """Per-turn reminder restates user identity AND assistant identity."""
     assert "YOU are the user" in _PERSONA_REMINDER

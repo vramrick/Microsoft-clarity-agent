@@ -232,7 +232,15 @@ def test_module_aggregate_na_does_not_promote_failed_icon() -> None:
 
 
 def test_summary_header_includes_na_count(tmp_path: Path) -> None:
-    """Top-level summary line gains a ``N criteria N/A`` bucket."""
+    """OK bullet's sub-list breaks out tests with N/A criteria.
+
+    A test that passed but had at least one N/A judge verdict is
+    counted as a sub-category of "passing" — it passed (N/A doesn't
+    fail) but the breakdown surfaces "criterion didn't apply" as a
+    separately-meaningful signal.  The count is at the TEST level,
+    not the criterion level: a test with 5 N/A criteria contributes
+    1 to the "N N/A" sub-count, not 5.
+    """
     test_outcomes: dict = {
         "evals/cases/x/test_a.py::t1": {
             "outcome": "passed", "duration": 1.0, "error": None,
@@ -253,8 +261,11 @@ def test_summary_header_includes_na_count(tmp_path: Path) -> None:
     write_summary(tmp_path, test_outcomes, judge_records)
 
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    # Top-line summary line has the new bucket.
-    assert "2 criteria N/A" in text
+    # OK bullet count is the test count (2 passed → 2 OK).  Both
+    # tests had at least one N/A verdict, so "2 N/A" appears in the
+    # sub-list.
+    assert "**2 OK**" in text
+    assert "2 N/A" in text
     # Per-criterion icon for the NA verdicts is the heavy minus.
     assert _NA_ICON in text
     # Per-criterion label uses the slash form for readability.

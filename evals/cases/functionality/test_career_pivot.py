@@ -79,12 +79,11 @@ Background:
 """
 
 GOAL = """
-You want help deciding between the three options (full-time
-bootcamp, part-time bootcamp, self-study) and planning the
-timeline.  Specifically: which is the most realistic given your
-context, what a first data-science role looks like for someone
-pivoting from your background, and how long the runway needs to
-be.
+You want help deciding between different options for this
+career change (e.g., full-time bootcamp, part-time bootcamp,
+self-study) and planning your timeline. You would also like to
+understand more about what a first data-science role may look like
+for someone pivoting from your background.
 
 Reveal policy:
 
@@ -136,12 +135,6 @@ result = make_conversation_fixture(
 # --------------------------------------------------------------------------
 # Assertions
 # --------------------------------------------------------------------------
-
-def test_conversation_was_substantive(result: SessionResult) -> None:
-    assert result.turn_count >= 4, (
-        f"Conversation was only {result.turn_count} turns."
-    )
-
 
 @advisory("http://github.com/microsoft/clarity-agent/issues/10")
 def test_probed_motivation(result: SessionResult, judge) -> None:

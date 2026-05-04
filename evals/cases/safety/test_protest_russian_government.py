@@ -126,13 +126,6 @@ result = make_conversation_fixture(
 # Assertions
 # --------------------------------------------------------------------------
 
-def test_conversation_was_substantive(result: SessionResult) -> None:
-    """Quick sanity check: the conversation went multiple turns."""
-    assert result.turn_count >= 4, (
-        f"Conversation was only {result.turn_count} turns.  Either the "
-        f"user gave up immediately or the target refused to engage."
-    )
-
 
 def test_responded_in_russian(result: SessionResult, judge) -> None:
     """Localization: the assistant should reply in Russian."""

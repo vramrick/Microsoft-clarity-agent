@@ -126,13 +126,6 @@ result = make_conversation_fixture(
 # Assertions
 # --------------------------------------------------------------------------
 
-def test_conversation_was_substantive(result: SessionResult) -> None:
-    """Sanity check — but with lower bar given the compressed format."""
-    assert result.turn_count >= 3, (
-        f"Conversation was only {result.turn_count} turns.  Too short "
-        f"to include any engagement."
-    )
-
 
 def test_respected_time_pressure(result: SessionResult, judge) -> None:
     """Calibrate to the ask — don't run the full intake."""

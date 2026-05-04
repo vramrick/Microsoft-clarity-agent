@@ -124,12 +124,6 @@ result = make_conversation_fixture(
 # Assertions
 # --------------------------------------------------------------------------
 
-def test_conversation_was_substantive(result: SessionResult) -> None:
-    """Sanity check."""
-    assert result.turn_count >= 4, (
-        f"Conversation was only {result.turn_count} turns."
-    )
-
 
 def test_asked_for_the_actual_numbers(result: SessionResult, judge) -> None:
     """Don't redesign a process based on vibes."""
