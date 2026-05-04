@@ -17,7 +17,7 @@ Surfaces under test:
 - :meth:`Judge.smoke_check` — YES/NO/NA handling, cache behavior, and
   the deliberate choice NOT to route smoke results through the main
   recorder (they belong in a distinct part of the summary).
-- :func:`evals.framework.report` — 🟥 icon mapping, smoke_failed
+- :func:`evals.framework.report` — 🛑 icon mapping, smoke_failed
   counting in the top summary and module aggregate, the per-module
   "Smoke check failed" banner with the judge's reasoning.
 """
@@ -28,6 +28,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from evals.framework import SmokeCheckFailedError
 from evals.framework.config import EvalConfig, RoleConfig
 from evals.framework.judge import (
@@ -38,6 +39,8 @@ from evals.framework.judge import (
 )
 from evals.framework.report import (
     _first_smoke_reasoning,
+    _format_issue_link_long,
+    _format_issue_link_short,
     _load_smoke_gate_records,
     _module_aggregate,
     _smoke_anchor,
@@ -45,7 +48,7 @@ from evals.framework.report import (
 )
 from evals.framework.resume import JudgeCache
 
-_SMOKE_ICON = "\U0001F7E5"  # 🟥
+_SMOKE_ICON = "\U0001F6D1"  # 🛑
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +380,7 @@ def test_smoke_check_fingerprint_mismatch_suppresses_hit(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 def test_module_aggregate_smoke_failed_takes_icon_priority() -> None:
-    """🟥 outranks ❌ because a smoke failure means the whole sample is bad."""
+    """🛑 outranks ❌ because a smoke failure means the whole sample is bad."""
     icon, stats = _module_aggregate(
         ["smoke_failed", "smoke_failed", "smoke_failed"], na_count=0,
     )
@@ -386,7 +389,7 @@ def test_module_aggregate_smoke_failed_takes_icon_priority() -> None:
 
 
 def test_module_aggregate_smoke_failed_outranks_failed_and_passed() -> None:
-    """Mixed outcomes still show 🟥 when any test was smoke_failed."""
+    """Mixed outcomes still show 🛑 when any test was smoke_failed."""
     icon, stats = _module_aggregate(
         ["passed", "failed", "smoke_failed"], na_count=0,
     )
@@ -416,7 +419,7 @@ def test_first_smoke_reasoning_returns_none_when_no_reasoning() -> None:
 
 
 def test_summary_renders_smoke_failed_bucket_and_banner(tmp_path: Path) -> None:
-    """End-to-end: a smoke-failed test produces the 🟥 icon, the bucket
+    """End-to-end: a smoke-failed test produces the 🛑 icon, the bucket
     count in the top summary line, and the reasoning banner in Details.
     """
     test_outcomes = {
@@ -458,7 +461,7 @@ def test_summary_renders_smoke_failed_bucket_and_banner(tmp_path: Path) -> None:
 def test_summary_does_not_render_banner_when_no_smoke_failure(
     tmp_path: Path,
 ) -> None:
-    """No smoke failure → no banner, no 🟥, no smoke-failed bucket."""
+    """No smoke failure → no banner, no 🛑, no smoke-failed bucket."""
     test_outcomes = {
         "evals/cases/fn/test_x.py::test_a": {
             "outcome": "passed", "duration": 0.1, "error": None,
@@ -780,10 +783,680 @@ def test_smoke_row_shows_failure_verdict(tmp_path: Path) -> None:
     }
     write_summary(tmp_path, test_outcomes, {})
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    # The smoke row's outcome cell pairs ❌ with NO.
-    # Find the smoke row and check it has the failure marker.
-    smoke_row_start = text.find("smoke check")
-    smoke_row_end = text.find("\n", smoke_row_start)
-    smoke_row = text[smoke_row_start:smoke_row_end]
+    # The smoke row's outcome cell pairs ❌ with NO.  Anchor on the
+    # 🔬 marker that prefixes the smoke table row so this doesn't
+    # accidentally match the gate-level summary line above the
+    # table (which now also mentions "smoke check").
+    smoke_row_start = text.find("| 🔬 |")
+    while smoke_row_start != -1 and "smoke check" not in (
+        smoke_row := text[smoke_row_start:text.find("\n", smoke_row_start)]
+    ):
+        smoke_row_start = text.find("| 🔬 |", smoke_row_start + 1)
+    assert smoke_row_start != -1, "smoke check table row not found"
     assert "❌" in smoke_row
     assert "NO" in smoke_row
+
+
+# ---------------------------------------------------------------------------
+# Smoke-gate breakdown counts in the top-line summary + module heading
+#
+# The new gate-level summary line tells reviewers at-a-glance which
+# of the two gates fired across the run, distinct from the test-level
+# "smoke-failed" count (which counts deferred user tests, not gates).
+# The module heading qualifier identifies the failing gate per-module.
+# ---------------------------------------------------------------------------
+
+
+def test_summary_top_line_includes_smoke_gate_breakdown(tmp_path: Path) -> None:
+    """Two-line top summary: tests on one line, smoke gates on another.
+
+    The gate breakdown line distinguishes persona-adoption failures
+    from goal-exploration smoke failures so a reviewer doesn't have
+    to look at module heading qualifiers to learn which gate fired.
+    """
+    _seed_module_with_smoke_records(
+        tmp_path,
+        folder_rel="safety/test_x",
+        persona_record=JudgeRecord(
+            claim="...", verdict="NO", reasoning="sanitized topic",
+            elapsed=1.2, cost_usd=0.01,
+        ),
+        smoke_record=JudgeRecord(
+            claim="...", verdict="YES", reasoning="not run anyway",
+            elapsed=7.4, cost_usd=0.02,
+        ),
+    )
+    test_outcomes = {
+        f"evals/cases/safety/test_x.py::test_{n}": {
+            "outcome": "smoke_failed", "duration": 0.1,
+            "error": "X", "error_type": "smoke_failed",
+            "smoke_reasoning": "...",
+        } for n in ("a", "b")
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Test-level line: 2 deferred tests under the test count.
+    assert "2 smoke-failed" in text
+    # Gate-level line: 1 persona-adoption failure, 1 smoke check passed.
+    assert "2 smoke gates" in text
+    assert "1 passed" in text
+    assert "1 persona-adoption failed" in text
+
+
+def test_summary_top_line_omits_gate_line_when_no_records(
+    tmp_path: Path,
+) -> None:
+    """No smoke records on disk → no gate breakdown line emitted."""
+    test_outcomes = {
+        "evals/cases/fn/test_x.py::test_a": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "smoke gates" not in text
+
+
+def test_module_heading_appends_failing_gate_qualifier(
+    tmp_path: Path,
+) -> None:
+    """Per-module heading is annotated with the failing gate name."""
+    _seed_module_with_smoke_records(
+        tmp_path,
+        folder_rel="safety/test_x",
+        persona_record=JudgeRecord(
+            claim="...", verdict="NO", reasoning="x",
+            elapsed=1.0, cost_usd=0.01,
+        ),
+        smoke_record=JudgeRecord(
+            claim="...", verdict="YES", reasoning="x",
+            elapsed=5.0, cost_usd=0.02,
+        ),
+    )
+    test_outcomes = {
+        "evals/cases/safety/test_x.py::test_a": {
+            "outcome": "smoke_failed", "duration": 0.1,
+            "error": "X", "error_type": "smoke_failed",
+            "smoke_reasoning": "...",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Heading qualifier names the failing gate without the redundant
+    # " check" suffix ("persona-adoption gate failed", not
+    # "persona-adoption check gate failed").
+    assert "(persona-adoption gate failed)" in text
+    assert "persona-adoption check gate" not in text
+
+
+def test_module_heading_no_qualifier_when_no_smoke_failure(
+    tmp_path: Path,
+) -> None:
+    """Modules whose smoke gates passed don't get a qualifier."""
+    _seed_module_with_smoke_records(
+        tmp_path,
+        folder_rel="safety/test_x",
+        persona_record=JudgeRecord(
+            claim="...", verdict="YES", reasoning="x",
+            elapsed=1.0, cost_usd=0.01,
+        ),
+        smoke_record=JudgeRecord(
+            claim="...", verdict="YES", reasoning="x",
+            elapsed=5.0, cost_usd=0.02,
+        ),
+    )
+    test_outcomes = {
+        "evals/cases/safety/test_x.py::test_a": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "gate failed" not in text
+
+
+# ---------------------------------------------------------------------------
+# @advisory marker: outcome rewrite + report rendering
+#
+# The marker lets eval authors flag a test whose failure shouldn't
+# block the suite.  conftest's pytest_runtest_makereport rewrites
+# pytest's outcome to "passed" so the failure doesn't reach pytest's
+# exit code; our summary renders it as 💡 advisory-failed.
+# ---------------------------------------------------------------------------
+
+
+def test_advisory_marker_re_exported_from_framework() -> None:
+    """``from evals.framework import advisory`` is the public path.
+
+    Eval authors import this; pytest's marker namespace is an
+    implementation detail.  The exported symbol is the same
+    pytest mark, so applying it works exactly like
+    ``@pytest.mark.advisory``.
+    """
+    from evals.framework import advisory
+
+    @advisory
+    def some_test() -> None:
+        pass
+
+    assert any(
+        m.name == "advisory" for m in some_test.pytestmark  # type: ignore[attr-defined]
+    )
+
+
+def test_advisory_failed_renders_with_orange_icon(tmp_path: Path) -> None:
+    """A test routed to advisory_failed renders 💡, not ❌ or 🛑."""
+    test_outcomes = {
+        "evals/cases/fn/test_x.py::test_aspirational": {
+            "outcome": "advisory_failed", "duration": 0.1,
+            "error": "AssertionError: judge said NO",
+            "error_type": "assertion",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Light bulb (advisory) marker present.
+    assert "\U0001F4A1" in text  # 💡
+    # Failure markers absent — no real failures, no smoke failures.
+    assert "❌" not in text
+    assert "\U0001F6D1" not in text  # 🛑
+
+
+def test_advisory_failed_appears_in_top_line_summary(tmp_path: Path) -> None:
+    """Top-line summary lists the advisory-failed bucket."""
+    test_outcomes = {
+        "evals/cases/fn/test_x.py::test_a": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+        "evals/cases/fn/test_x.py::test_aspirational": {
+            "outcome": "advisory_failed", "duration": 0.1,
+            "error": "AssertionError",
+            "error_type": "assertion",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "1 advisory-failed" in text
+
+
+def test_module_aggregate_advisory_outranks_passed_below_failed() -> None:
+    """Icon precedence: advisory_failed > passed/skipped, but < failed.
+
+    A module with one advisory failure shouldn't show ✅ (it's not
+    a clean pass) but shouldn't show ❌ either (real failures
+    outrank advisories — the icon should reflect the worst thing
+    happening).
+    """
+    # Only advisory failure: 💡
+    icon, _ = _module_aggregate(["advisory_failed"], na_count=0)
+    assert icon == "\U0001F4A1"  # 💡
+
+    # Mix of passed + advisory: still 💡 (advisory outranks passed).
+    icon, _ = _module_aggregate(["passed", "advisory_failed"], na_count=0)
+    assert icon == "\U0001F4A1"
+
+    # Mix of failed + advisory: ❌ (real failure outranks advisory).
+    icon, _ = _module_aggregate(["failed", "advisory_failed"], na_count=0)
+    assert icon == "❌"
+
+    # Mix of smoke_failed + advisory: 🛑 (smoke failure outranks all).
+    icon, _ = _module_aggregate(
+        ["smoke_failed", "advisory_failed"], na_count=0,
+    )
+    assert icon == "\U0001F6D1"
+
+
+def test_module_aggregate_advisory_in_stats_text() -> None:
+    """Per-module stats text lists the advisory-failed bucket."""
+    _, stats = _module_aggregate(
+        ["passed", "advisory_failed"], na_count=0,
+    )
+    assert "1/2 passed" in stats
+    assert "1 advisory-failed" in stats
+
+
+# ---------------------------------------------------------------------------
+# Conftest hook: @advisory failure rewrite
+#
+# Drives evals/conftest.py's ``pytest_runtest_makereport`` directly
+# with mock ``item`` and ``call`` objects so the hook's outcome
+# rewrite is exercised without spinning pytest up in a subprocess.
+# ---------------------------------------------------------------------------
+
+
+class _FakeMarker:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        # Match pytest's MarkDecorator surface.  Tests that exercise
+        # marker arguments (e.g. ``@advisory("url")``) override
+        # these via subclass; the default empty-args/kwargs shape
+        # corresponds to bare ``@advisory`` usage.
+        self.args: tuple[object, ...] = ()
+        self.kwargs: dict[str, object] = {}
+
+
+class _FakeItem:
+    """Minimum surface ``pytest_runtest_makereport`` reads off ``item``."""
+
+    def __init__(
+        self, nodeid: str, *, marker: str | None = None,
+    ) -> None:
+        self.nodeid = nodeid
+        self._marker = _FakeMarker(marker) if marker else None
+        # makereport calls _snapshot_summary(item.config) — a trivial
+        # MagicMock-style stand-in is fine since _snapshot_summary
+        # bails when there are no test_outcomes / output_dir.
+        self.config = type("FakeConfig", (), {"getoption": lambda self, _: None})()
+
+    def get_closest_marker(self, name: str) -> _FakeMarker | None:
+        return self._marker if self._marker and self._marker.name == name else None
+
+
+class _FakeExcInfo:
+    def __init__(self, exc: BaseException) -> None:
+        self.value = exc
+        self.type = type(exc)
+
+    def errisinstance(self, cls: type) -> bool:
+        return isinstance(self.value, cls)
+
+
+class _FakeCall:
+    def __init__(self, when: str, exc: BaseException | None = None) -> None:
+        self.when = when
+        self.excinfo = _FakeExcInfo(exc) if exc is not None else None
+
+
+class _FakeReport:
+    def __init__(
+        self, when: str, outcome: str, *, longreprtext: str = "",
+    ) -> None:
+        self.when = when
+        self.outcome = outcome
+        self.duration = 0.1
+        self.longreprtext = longreprtext
+
+
+class _FakeOutcome:
+    def __init__(self, report: _FakeReport) -> None:
+        self._report = report
+
+    def get_result(self) -> _FakeReport:
+        return self._report
+
+
+def _drive_makereport(item: _FakeItem, call: _FakeCall, report: _FakeReport) -> None:
+    """Drive the hookwrapper generator through one full cycle."""
+    from evals.conftest import pytest_runtest_makereport
+
+    gen = pytest_runtest_makereport(item, call)
+    # First next() runs to ``outcome = yield``.
+    next(gen)
+    # send() resumes the generator, providing the outcome value the
+    # hook would normally receive from pytest's plugin manager.
+    try:
+        gen.send(_FakeOutcome(report))
+    except StopIteration:
+        pass
+
+
+def test_advisory_marker_rewrites_failed_assertion_to_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end on the hook: ``@advisory`` + AssertionError →
+    report outcome rewritten to "passed", _test_outcomes records
+    "advisory_failed".
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+    item = _FakeItem(
+        "evals/cases/fn/test_x.py::test_a", marker="advisory",
+    )
+    call = _FakeCall("call", AssertionError("nope"))
+    report = _FakeReport("call", "failed", longreprtext="AssertionError: nope")
+
+    _drive_makereport(item, call, report)
+
+    # Pytest's view: passed (so exit code stays 0).
+    assert report.outcome == "passed"
+    assert getattr(report, "wasxfail", None) == "advisory"
+    # Our summary's view: routed to the advisory bucket.
+    assert (
+        conftest._test_outcomes[item.nodeid]["outcome"] == "advisory_failed"
+    )
+    assert conftest._test_outcomes[item.nodeid]["error_type"] == "assertion"
+
+
+def test_advisory_marker_does_not_rewrite_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A passing ``@advisory`` test stays a normal pass — no rewrite.
+
+    The marker only kicks in on failure; passes report exactly like
+    any other test.
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+    item = _FakeItem(
+        "evals/cases/fn/test_x.py::test_a", marker="advisory",
+    )
+    call = _FakeCall("call")  # no exception
+    report = _FakeReport("call", "passed")
+
+    _drive_makereport(item, call, report)
+
+    assert report.outcome == "passed"
+    assert getattr(report, "wasxfail", None) is None
+    assert (
+        conftest._test_outcomes[item.nodeid]["outcome"] == "passed"
+    )
+
+
+def test_advisory_marker_does_not_rewrite_infra_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Infrastructure errors are blocking even with ``@advisory``.
+
+    The marker is for "this assertion is aspirational, don't gate
+    on it" — it isn't license to ignore broken backends or fixture
+    crashes.  The hook should NOT rewrite, AND should let pytest's
+    fail-fast (pytest.exit) fire if applicable.
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+    item = _FakeItem(
+        "evals/cases/fn/test_x.py::test_a", marker="advisory",
+    )
+    # RuntimeError is classified as "infra" by _classify_error.
+    call = _FakeCall("call", RuntimeError("backend exploded"))
+    report = _FakeReport("call", "failed", longreprtext="RuntimeError")
+    # Stub out pytest.exit so the test doesn't actually abort.
+    exit_called = []
+    monkeypatch.setattr(
+        pytest, "exit",
+        lambda msg, returncode=1: exit_called.append((msg, returncode)),
+    )
+
+    _drive_makereport(item, call, report)
+
+    # Did NOT rewrite — infra failures still register as failed.
+    assert report.outcome == "failed"
+    assert (
+        conftest._test_outcomes[item.nodeid]["outcome"] == "failed"
+    )
+    # And pytest.exit was triggered (infra failure is fail-fast).
+    assert exit_called, "expected pytest.exit on infra failure"
+
+
+def test_unmarked_test_failure_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A test without ``@advisory`` follows the existing failure path."""
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+    item = _FakeItem("evals/cases/fn/test_x.py::test_a", marker=None)
+    call = _FakeCall("call", AssertionError("real failure"))
+    report = _FakeReport("call", "failed", longreprtext="AssertionError")
+
+    _drive_makereport(item, call, report)
+
+    # Outcome stays failed — no marker, no rewrite.
+    assert report.outcome == "failed"
+    assert (
+        conftest._test_outcomes[item.nodeid]["outcome"] == "failed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# @advisory issue-tracker URL: extraction + rendering
+#
+# ``@advisory("https://...")`` and ``@advisory(issue="https://...")``
+# both attach a tracker URL to the marker.  The conftest hook reads
+# it off the marker on advisory_failed; the report renders it next
+# to the test name (compact link in the table, full link in details).
+# GitHub issue URLs render as ``#NNN``; other URLs as 🔗.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url, expected", [
+    (
+        "https://github.com/microsoft/clarity-agent/issues/174",
+        "[#174](https://github.com/microsoft/clarity-agent/issues/174)",
+    ),
+    (
+        # http (not https) — same handling.
+        "http://github.com/owner/repo/issues/3",
+        "[#3](http://github.com/owner/repo/issues/3)",
+    ),
+    (
+        # www. prefix — tolerated.
+        "https://www.github.com/owner/repo/issues/42",
+        "[#42](https://www.github.com/owner/repo/issues/42)",
+    ),
+    (
+        # trailing slash — tolerated, captured number unchanged.
+        "https://github.com/owner/repo/issues/12/",
+        "[#12](https://github.com/owner/repo/issues/12/)",
+    ),
+])
+def test_format_issue_link_short_recognizes_github_urls(
+    url: str, expected: str,
+) -> None:
+    """GitHub issue URLs render as the bare ``#NNN`` form."""
+    assert _format_issue_link_short(url) == expected
+
+
+def test_format_issue_link_short_falls_back_to_chain_link() -> None:
+    """Non-GitHub URLs render as a chain-link emoji.
+
+    Generic enough for JIRA, Linear, internal trackers — without
+    pretending the URL has GitHub semantics.
+    """
+    url = "https://example.com/issues/abc-123"
+    assert _format_issue_link_short(url) == f"[\U0001F517]({url})"
+
+
+def test_format_issue_link_short_does_not_match_partial_url() -> None:
+    """A GitHub URL embedded in a longer string doesn't match.
+
+    The regex is anchored — the whole string must be the URL — so
+    ``"see https://github.com/.../issues/1 for context"`` does NOT
+    get mistakenly compacted to ``#1``.
+    """
+    url_in_sentence = (
+        "see https://github.com/owner/repo/issues/1 for context"
+    )
+    # Falls through to the generic 🔗 form.
+    assert "#" not in _format_issue_link_short(url_in_sentence)
+
+
+def test_format_issue_link_short_handles_empty() -> None:
+    """Empty string → empty link (no crash, no spurious markdown)."""
+    assert _format_issue_link_short("") == ""
+    assert _format_issue_link_short("   ") == ""
+
+
+def test_format_issue_link_long_uses_full_url_for_non_github() -> None:
+    """Long form: GH-shortened, but other URLs render as full
+    ``[url](url)`` so the reviewer can see what tracker it points
+    at without having to hover.
+    """
+    gh = "https://github.com/owner/repo/issues/9"
+    other = "https://linear.app/team/issue/ABC-7"
+    assert _format_issue_link_long(gh) == f"[#9]({gh})"
+    assert _format_issue_link_long(other) == f"[{other}]({other})"
+
+
+def test_advisory_marker_captures_positional_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``@advisory("url")`` stores the URL on _test_outcomes.
+
+    Positional form is the user's preferred shorthand from the
+    original ask.  Captured as ``advisory_issue`` next to the
+    test's outcome record.
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+
+    class _MarkerWithArgs:
+        name = "advisory"
+        args = ("https://github.com/microsoft/clarity-agent/issues/174",)
+        kwargs: dict[str, str] = {}
+
+    class _ItemWithMarker(_FakeItem):
+        def get_closest_marker(self, name: str) -> object:  # noqa: ARG002
+            return _MarkerWithArgs()
+
+    item = _ItemWithMarker(
+        "evals/cases/fn/test_x.py::test_a", marker="advisory",
+    )
+    call = _FakeCall("call", AssertionError("nope"))
+    report = _FakeReport("call", "failed", longreprtext="AssertionError")
+
+    _drive_makereport(item, call, report)
+
+    rec = conftest._test_outcomes[item.nodeid]
+    assert rec["outcome"] == "advisory_failed"
+    assert rec["advisory_issue"] == (
+        "https://github.com/microsoft/clarity-agent/issues/174"
+    )
+
+
+def test_advisory_marker_captures_keyword_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``@advisory(issue="url")`` works the same as positional."""
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+
+    class _MarkerWithKwargs:
+        name = "advisory"
+        args: tuple[str, ...] = ()
+        kwargs = {"issue": "https://example.com/tickets/42"}
+
+    class _ItemWithMarker(_FakeItem):
+        def get_closest_marker(self, name: str) -> object:  # noqa: ARG002
+            return _MarkerWithKwargs()
+
+    item = _ItemWithMarker("evals/cases/fn/test_x.py::test_b")
+    call = _FakeCall("call", AssertionError("nope"))
+    report = _FakeReport("call", "failed", longreprtext="AssertionError")
+
+    _drive_makereport(item, call, report)
+
+    rec = conftest._test_outcomes[item.nodeid]
+    assert rec["outcome"] == "advisory_failed"
+    assert rec["advisory_issue"] == "https://example.com/tickets/42"
+
+
+def test_advisory_marker_no_url_stores_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare ``@advisory`` (no args) leaves ``advisory_issue`` as None.
+
+    Zero-argument usage stays the cheap fallthrough path; the
+    rendering layer treats ``None`` as "no link to show."
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+    item = _FakeItem(
+        "evals/cases/fn/test_x.py::test_c", marker="advisory",
+    )
+    call = _FakeCall("call", AssertionError("nope"))
+    report = _FakeReport("call", "failed", longreprtext="AssertionError")
+
+    _drive_makereport(item, call, report)
+
+    assert conftest._test_outcomes[item.nodeid]["advisory_issue"] is None
+
+
+def test_summary_table_appends_issue_link_for_advisory_failed(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: advisory_failed row in the per-module table
+    includes the issue link as a markdown suffix on the test
+    name."""
+    test_outcomes = {
+        "evals/cases/fn/test_x.py::test_a": {
+            "outcome": "advisory_failed", "duration": 0.1,
+            "error": "AssertionError",
+            "error_type": "assertion",
+            "advisory_issue": (
+                "https://github.com/microsoft/clarity-agent/issues/174"
+            ),
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Table cell shows the GH-shortened link next to the test name.
+    assert "[#174]" in text
+    assert "https://github.com/microsoft/clarity-agent/issues/174" in text
+
+
+def test_summary_table_no_link_when_no_url(tmp_path: Path) -> None:
+    """advisory_failed without a URL renders cleanly (no spurious link)."""
+    test_outcomes = {
+        "evals/cases/fn/test_x.py::test_a": {
+            "outcome": "advisory_failed", "duration": 0.1,
+            "error": "AssertionError",
+            "error_type": "assertion",
+            "advisory_issue": None,
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # No tracking-section, no chain-link.
+    assert "Tracked in:" not in text
+    assert "\U0001F517" not in text  # 🔗
+
+
+def test_summary_table_no_link_for_passing_test_with_advisory_marker(
+    tmp_path: Path,
+) -> None:
+    """A passing test that happens to have ``advisory_issue`` set
+    (e.g. a stale leftover) does NOT show the issue link.
+
+    Defensive: the report only surfaces the issue link when the
+    test actually entered the advisory_failed bucket — passing
+    tests don't need a tracker pointer.
+    """
+    test_outcomes = {
+        "evals/cases/fn/test_x.py::test_a": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+            "advisory_issue": (
+                "https://github.com/microsoft/clarity-agent/issues/1"
+            ),
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "[#1]" not in text
+    assert "Tracked in:" not in text
+
+
+def test_summary_details_renders_tracked_in_for_advisory_failed(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: details section gets a ``**Tracked in:**`` line
+    under the test heading on advisory_failed."""
+    test_outcomes = {
+        "evals/cases/fn/test_x.py::test_a": {
+            "outcome": "advisory_failed", "duration": 0.1,
+            "error": "AssertionError",
+            "error_type": "assertion",
+            "advisory_issue": "https://example.com/tickets/42",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "**Tracked in:**" in text
+    # Non-GH URL → full link text.
+    assert "https://example.com/tickets/42" in text

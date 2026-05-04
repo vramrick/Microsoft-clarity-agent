@@ -26,6 +26,7 @@ skimmable.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -37,15 +38,25 @@ from evals.framework.judge import JudgeRecord
 _OUTCOME_ICON: dict[str, str] = {
     "passed": "\u2705",          # ✅
     "failed": "\u274C",          # ❌
-    "skipped": "\u23ED\uFE0F",   # ⏭️
-    "error": "\u26A0\uFE0F",     # ⚠️
+    "skipped": "\u23F8",          # ⏸
+    "error": "\U0001F4A5",        # 💥
     "running": "\u23F3",         # ⏳
     # Module-level "the conversation didn't actually exercise the
     # persona's goal — downstream assertions are operating on a bad
-    # sample and have been aborted."  Distinct from ❌ (assertion
-    # fail) and ⚠️ (infra crash): same severity-of-attention, but a
-    # different kind of failure that doesn't abort the whole run.
-    "smoke_failed": "\U0001F7E5", # 🟥
+    # sample and have been aborted."  Stop-sign octagon: distinct
+    # SHAPE from the other failure icons so the outcome stays
+    # readable in monochrome rendering and for users with
+    # red/orange color confusion (the previous 🟥 / 🟧 pairing was
+    # the same square shape distinguished only by hue).
+    "smoke_failed": "\U0001F6D1", # 🛑
+    # Per-test "marked @advisory, assertion failed".  Light bulb:
+    # signals "improvement opportunity" rather than "stop
+    # everything," and shape-distinct from 🛑 / ❌ / 💥 so a
+    # colorblind reader can still tell the failure flavors apart.
+    # The test's pytest outcome was rewritten to "passed" so it
+    # does NOT contribute to pytest's exit code; this bucket is
+    # purely for the human reading summary.md.
+    "advisory_failed": "\U0001F4A1", # 💡
 }
 
 # Per-judge-criterion icons.  ``NA`` is the "doesn't apply" verdict —
@@ -67,6 +78,52 @@ def _verdict_icon(verdict: str) -> str:
     a fail than a pass for review purposes.
     """
     return _VERDICT_ICON.get(verdict, _VERDICT_ICON["NO"])
+
+
+# GitHub issue URL — anchored ``^`` and ``$``-equivalent so we don't
+# match e.g. a URL embedded in a longer string.  Captures the issue
+# number for compact ``#NNN`` rendering.  Tolerates http:// and
+# https://, optional ``www.`` prefix, optional trailing slash.
+_GH_ISSUE_URL_RE = re.compile(
+    r"\Ahttps?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/issues/(\d+)/?\Z",
+    re.IGNORECASE,
+)
+
+
+def _format_issue_link_short(url: str) -> str:
+    """Render *url* as a compact markdown link for use in a table cell.
+
+    GitHub issue URLs render as ``#NNN`` linking to the URL.  Other
+    URLs render as a chain-link emoji 🔗 — generic enough for any
+    tracker (JIRA, Linear, internal) without claiming GitHub
+    semantics.  Markdown links use ``rel=`` attributes implicitly
+    via GitHub's rendering, so no special escaping needed.
+    """
+    stripped = url.strip()
+    if not stripped:
+        return ""
+    m = _GH_ISSUE_URL_RE.match(stripped)
+    if m:
+        return f"[#{m.group(1)}]({stripped})"
+    return f"[\U0001F517]({stripped})"  # 🔗
+
+
+def _format_issue_link_long(url: str) -> str:
+    """Render *url* as a markdown link for use in the per-test details.
+
+    Same GH-aware shortening as :func:`_format_issue_link_short`,
+    but the non-GH fallback shows the full URL as link text rather
+    than just an icon — there's room in the details section, and
+    seeing the URL helps reviewers spot whether it's pointing at the
+    expected tracker.
+    """
+    stripped = url.strip()
+    if not stripped:
+        return ""
+    m = _GH_ISSUE_URL_RE.match(stripped)
+    if m:
+        return f"[#{m.group(1)}]({stripped})"
+    return f"[{stripped}]({stripped})"
 
 
 def _parse_nodeid(nodeid: str) -> dict[str, str]:
@@ -226,6 +283,65 @@ def _smoke_anchor(folder_rel: str, reserved_name: str) -> str:
     return f"smoke-{base}-{slug}"
 
 
+def _failing_gate_label(
+    smoke_gate_records: list[tuple[str, str, JudgeRecord | None]],
+) -> str | None:
+    """Return the short label of the failed smoke gate, or None.
+
+    A smoke-failed module always has exactly one failed gate (the
+    runner aborts on the first failure), so we can return one label.
+    Used to qualify the module heading when ``smoke_failed`` is in
+    the test counts — reviewer sees "(persona-adoption gate failed)"
+    without expanding the module's table.
+
+    Strips the trailing " check" from the label so it reads
+    naturally with the "gate" suffix the heading appends — the full
+    label "smoke check" + " gate failed" reads as "smoke check gate
+    failed" which is redundant; the short form "smoke gate failed"
+    is what we want.
+    """
+    for _, label, rec in smoke_gate_records:
+        if rec is not None and rec.verdict == "NO":
+            return label.removesuffix(" check")
+    return None
+
+
+def _aggregate_smoke_gate_verdicts(
+    outputs_dir: Path,
+    folder_rels: list[str],
+) -> dict[str, int]:
+    """Tally smoke-gate verdicts across the given modules.
+
+    Returns ``{"passed": N, "persona_adoption_failed": N,
+    "smoke_failed": N}`` — the gate-level counterpart to the
+    test-level outcome counts.  Distinct because user tests roll up
+    differently: one gate failure → multiple deferred user tests,
+    so a per-test count of "smoke-failed" misrepresents how many
+    actual gates fired.
+
+    Modules whose cache file isn't on disk yet (in-flight, crashed
+    early) contribute nothing — gate counts only reflect what
+    actually ran.
+    """
+    counts: dict[str, int] = {
+        "passed": 0,
+        "persona_adoption_failed": 0,
+        "smoke_failed": 0,
+    }
+    for folder_rel in folder_rels:
+        records = _load_smoke_gate_records(outputs_dir, folder_rel)
+        for reserved_name, _label, rec in records:
+            if rec is None:
+                continue
+            if rec.verdict in ("YES", "NA"):
+                counts["passed"] += 1
+            elif reserved_name == "__persona_adoption__":
+                counts["persona_adoption_failed"] += 1
+            elif reserved_name == "__smoke__":
+                counts["smoke_failed"] += 1
+    return counts
+
+
 def _blockquote_lines(text: str) -> list[str]:
     """Return *text* rendered as a markdown blockquote (``> `` prefix)."""
     return [f"> {line}" if line else ">" for line in text.splitlines()]
@@ -287,7 +403,12 @@ def _module_aggregate(
     # Icon precedence: smoke_failed outranks everything test-level
     # because it means the whole module's sample is invalid; reading
     # individual pass/fail counts on top of a bad conversation is
-    # misleading, so we flag the module with the 🟥 icon first.
+    # misleading, so we flag the module with the 🛑 icon first.
+    # ``advisory_failed`` is the lowest-severity failure-shaped
+    # bucket — it ranks ABOVE passed/skipped (so a module with one
+    # advisory failure doesn't show as ✅) but BELOW everything else
+    # (a real failure, smoke failure, infra error, or in-flight test
+    # should outrank it for the at-a-glance icon).
     if counts.get("smoke_failed"):
         icon = _OUTCOME_ICON["smoke_failed"]
     elif counts.get("failed"):
@@ -296,6 +417,8 @@ def _module_aggregate(
         icon = _OUTCOME_ICON["error"]
     elif counts.get("running"):
         icon = _OUTCOME_ICON["running"]
+    elif counts.get("advisory_failed"):
+        icon = _OUTCOME_ICON["advisory_failed"]
     elif counts.get("skipped") and not counts.get("passed"):
         icon = _OUTCOME_ICON["skipped"]
     else:
@@ -314,6 +437,10 @@ def _module_aggregate(
         parts.append(f"{counts['running']} running")
     if counts.get("smoke_failed"):
         parts.append(f"{counts['smoke_failed']} smoke-failed")
+    if counts.get("advisory_failed"):
+        parts.append(
+            f"{counts['advisory_failed']} advisory-failed"
+        )
     if na_count:
         parts.append(f"{na_count} N/A criteria")
     return icon, ", ".join(parts)
@@ -423,7 +550,7 @@ def write_summary(
 
     counts: dict[str, int] = {
         "passed": 0, "failed": 0, "skipped": 0,
-        "error": 0, "smoke_failed": 0,
+        "error": 0, "smoke_failed": 0, "advisory_failed": 0,
     }
     for outcome in test_outcomes.values():
         key = outcome.get("outcome", "error")
@@ -462,11 +589,56 @@ def write_summary(
         # Bold this one — smoke failure means entire modules' samples
         # are invalid, which is worth surfacing prominently.
         summary_line += f" · **{counts['smoke_failed']} smoke-failed**"
+    if counts["advisory_failed"]:
+        # Not bolded — advisory failures are by design informational
+        # and don't block the suite.  Surfaced so a reviewer sees
+        # the count at a glance and can prioritize accordingly.
+        summary_line += (
+            f" · {counts['advisory_failed']} advisory-failed"
+        )
     if running_ids:
         summary_line += f" · {len(running_ids)} running"
+
+    # Gate-level summary line.  The test-level counts above lump
+    # every deferred test into "smoke-failed" without showing which
+    # gate actually fired; this line breaks that out so a reviewer
+    # can tell at-a-glance whether the failure was at turn-1
+    # persona-adoption or at the post-conversation goal-exploration
+    # smoke check.  Aggregated across all modules.
+    folder_rels_for_gates = sorted({
+        _parse_nodeid(n)["folder_rel"]
+        for n in test_outcomes
+        if n != "<unknown>"
+    })
+    gate_counts = _aggregate_smoke_gate_verdicts(
+        outputs_dir, folder_rels_for_gates,
+    )
+    total_gates = (
+        gate_counts["passed"]
+        + gate_counts["persona_adoption_failed"]
+        + gate_counts["smoke_failed"]
+    )
     if total_na:
         summary_line += f" · {total_na} criteria N/A"
     lines.append(summary_line)
+
+    # Render the gate-level summary as a second top-line.  Only
+    # emitted when at least one gate verdict was recorded — skips
+    # cleanly on suite invocations that ran no real conversations
+    # (e.g. import-time errors, --collect-only).
+    if total_gates:
+        gate_line = (
+            f"**{total_gates} smoke gate{'s' if total_gates != 1 else ''}**"
+        )
+        if gate_counts["passed"]:
+            gate_line += f" · {gate_counts['passed']} passed"
+        if gate_counts["persona_adoption_failed"]:
+            n = gate_counts["persona_adoption_failed"]
+            gate_line += f" · **{n} persona-adoption failed**"
+        if gate_counts["smoke_failed"]:
+            n = gate_counts["smoke_failed"]
+            gate_line += f" · **{n} smoke check failed**"
+        lines.append(gate_line)
     lines.append("")
 
     # Group nodeids by module (<category>/<module-stem>) so the
@@ -496,6 +668,15 @@ def write_summary(
             module_outcomes, na_count=module_na,
         )
         meta = _load_module_metadata(outputs_dir, folder_rel)
+        # Append the failing gate name when the module has any
+        # smoke_failed tests.  Reviewer can see "(persona-adoption
+        # gate failed)" right in the heading without expanding the
+        # table to look at smoke rows.
+        smoke_gate_records = _load_smoke_gate_records(outputs_dir, folder_rel)
+        if "smoke_failed" in module_outcomes:
+            gate_label = _failing_gate_label(smoke_gate_records)
+            if gate_label is not None:
+                module_stats += f" ({gate_label} gate failed)"
         # Link the Results heading to the matching Details anchor so
         # reviewers can jump from the summary table straight to the
         # per-test breakdown without scrolling.
@@ -527,8 +708,8 @@ def write_summary(
         # makes the boundary explicit.  Either gate may be missing
         # (persona-adoption skipped on resumed runs; both missing if
         # the cache file isn't there yet) — only render rows for
-        # the gates that actually have records.
-        smoke_gate_records = _load_smoke_gate_records(outputs_dir, folder_rel)
+        # the gates that actually have records.  ``smoke_gate_records``
+        # was loaded above for the heading qualifier; reuse it here.
         rendered_any_gate = False
         for reserved_name, label, rec in smoke_gate_records:
             if rec is None:
@@ -586,8 +767,19 @@ def write_summary(
             outcome_cell = f"{test_icon} {info['outcome']}"
             if na_count and info["outcome"] == "passed":
                 outcome_cell += f" ({_VERDICT_ICON['NA']} {na_count})"
+            # Issue-tracker link for advisory failures.  Compact link
+            # next to the test name so reviewers can jump straight
+            # to the underlying issue without scrolling to Details.
+            # Only rendered when the test was advisory_failed AND
+            # the @advisory marker carried a URL.
+            test_name_cell = f"[`{test_label}`](#{anchor})"
+            issue_url = info.get("advisory_issue") if (
+                info["outcome"] == "advisory_failed"
+            ) else None
+            if issue_url:
+                test_name_cell += f" {_format_issue_link_short(issue_url)}"
             lines.append(
-                f"| {test_index} | [`{test_label}`](#{anchor}) | "
+                f"| {test_index} | {test_name_cell} | "
                 f"{outcome_cell} | "
                 f"{duration_cell} | "
                 f"{cost_cell} |"
@@ -606,6 +798,13 @@ def write_summary(
         module_icon, module_stats = _module_aggregate(
             module_outcomes, na_count=module_na,
         )
+        # Match the Results heading: append the failing gate name
+        # when the module has any smoke_failed tests.
+        smoke_gate_records = _load_smoke_gate_records(outputs_dir, folder_rel)
+        if "smoke_failed" in module_outcomes:
+            gate_label = _failing_gate_label(smoke_gate_records)
+            if gate_label is not None:
+                module_stats += f" ({gate_label} gate failed)"
         meta = _load_module_metadata(outputs_dir, folder_rel)
         # Anchor target for the Results-section link.  Placed inline
         # with the heading so the HTML id attaches to the section
@@ -662,8 +861,8 @@ def write_summary(
         # each module's detail section, before the scenario block
         # and the user-test sections.  These are the most
         # information-dense judge calls in the run and worth
-        # surfacing prominently.
-        smoke_gate_records = _load_smoke_gate_records(outputs_dir, folder_rel)
+        # surfacing prominently.  ``smoke_gate_records`` was loaded
+        # above for the heading qualifier; reuse it here.
         for reserved_name, label, rec in smoke_gate_records:
             if rec is None:
                 continue
@@ -705,6 +904,20 @@ def write_summary(
             )
             lines.append("")
             test_index += 1
+
+            # Issue-tracker link for advisory failures.  Rendered
+            # right under the heading so reviewers see the tracking
+            # context before the judge reasoning — useful when the
+            # issue contains broader notes that explain WHY this
+            # criterion is currently aspirational.
+            issue_url = info.get("advisory_issue") if (
+                info["outcome"] == "advisory_failed"
+            ) else None
+            if issue_url:
+                lines.append(
+                    f"**Tracked in:** {_format_issue_link_long(issue_url)}"
+                )
+                lines.append("")
 
             if records:
                 lines.append("**Judge evaluations:**")

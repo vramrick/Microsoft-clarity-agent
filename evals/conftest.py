@@ -121,6 +121,18 @@ def pytest_configure(config: pytest.Config) -> None:
     will surface them later); ``--print-config`` treats the same
     failure as fatal because the flag's whole purpose is diagnostic.
     """
+    # Register the ``advisory`` marker so pytest doesn't warn when
+    # an eval imports it from ``evals.framework`` and applies it to
+    # a test.  See ``evals.framework.advisory`` for the decorator
+    # definition and the makereport hook below for the outcome
+    # rewrite.
+    config.addinivalue_line(
+        "markers",
+        "advisory: a test whose failure is informative but should "
+        "not block the suite (no contribution to pytest exit code, "
+        "rendered as 💡 advisory-failed in summary.md)",
+    )
+
     print_and_exit = bool(config.getoption("--print-config"))
     try:
         eval_cfg = load_default()
@@ -455,13 +467,50 @@ def pytest_runtest_makereport(item, call):
         error_type: str | None = None
         if report.outcome == "failed":
             error_type = _classify_error(call)
+
+        # @advisory interception.  If a test marked ``@advisory``
+        # failed an assertion, route it to the ``advisory_failed``
+        # outcome bucket and rewrite pytest's report outcome to
+        # ``"passed"`` so the suite's exit code stays 0.  Only
+        # applies to assertion-style failures — infrastructure
+        # errors and smoke failures are always blocking, even on an
+        # advisory-marked test, because they signal something broken
+        # about the run rather than a behavior the eval is probing.
+        advisory_marker = item.get_closest_marker("advisory")
+        outcome_label = report.outcome
+        advisory_issue: str | None = None
+        if (
+            advisory_marker is not None
+            and report.outcome == "failed"
+            and error_type == "assertion"
+        ):
+            outcome_label = "advisory_failed"
+            # Rewrite the pytest report so the test contributes to
+            # neither pytest's exit code nor its terminal summary's
+            # "failed" line.  Our own summary tracks the original
+            # failure via ``outcome_label`` above.
+            report.outcome = "passed"
+            report.wasxfail = "advisory"  # surfaces in -v output
+            # Optional issue-tracker URL passed to the marker:
+            # ``@advisory("https://...")`` (positional) or
+            # ``@advisory(issue="https://...")`` (keyword).  Stored
+            # as-is on _test_outcomes so the report can render it
+            # next to the failure.  We only capture it on the
+            # actual advisory_failed path — a passing advisory test
+            # has no failure to point at, so the URL is noise.
+            if advisory_marker.args:
+                advisory_issue = str(advisory_marker.args[0])
+            elif "issue" in advisory_marker.kwargs:
+                advisory_issue = str(advisory_marker.kwargs["issue"])
+
         _test_outcomes[item.nodeid] = {
-            "outcome": report.outcome,
+            "outcome": outcome_label,
             "duration": report.duration,
             "error": (
-                report.longreprtext if report.outcome == "failed" else None
+                report.longreprtext if outcome_label != "passed" else None
             ),
             "error_type": error_type,
+            "advisory_issue": advisory_issue,
         }
         _snapshot_summary(item.config)
 
