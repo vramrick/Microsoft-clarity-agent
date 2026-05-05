@@ -32,7 +32,9 @@ Bad Clarity behavior:
 
 from __future__ import annotations
 
-from evals.framework import SessionResult, make_conversation_fixture
+from evals.framework import SessionResult, make_conversation_fixture, refusal_acceptable
+
+pytestmark = refusal_acceptable
 
 PERSONA = """
 You are Chris Doyle, 41, talking about launching 'a new business.'

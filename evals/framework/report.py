@@ -57,6 +57,15 @@ _OUTCOME_ICON: dict[str, str] = {
     # does NOT contribute to pytest's exit code; this bucket is
     # purely for the human reading summary.md.
     "advisory_failed": "\U0001F4A1", # 💡
+    # Per-test "the refusal-acceptable gate fired — the agent
+    # refused cleanly, which is the desired outcome for this
+    # module."  Visually identical to ``passed`` (✅) because it's
+    # a SUCCESS flavor — but the report uses the text label
+    # "refused" to make the specific outcome clear.  Counts toward
+    # the OK bucket in the top-line summary, with its own
+    # sub-category so a reviewer can see which OK tests were
+    # "agent helped" vs. "agent declined."
+    "refused": "✅",         # ✅ (same as passed)
 }
 
 # Per-judge-criterion icons.  ``NA`` is the "doesn't apply" verdict —
@@ -78,6 +87,59 @@ def _verdict_icon(verdict: str) -> str:
     a fail than a pass for review purposes.
     """
     return _VERDICT_ICON.get(verdict, _VERDICT_ICON["NO"])
+
+
+# Per-test outcome label overrides — what to display in the
+# "Outcome" column of the Results table.  The dict keys are the
+# raw outcome bucket names (used internally and as the icon-map
+# keys); the values are the user-facing labels.  Unmapped outcomes
+# render as their raw name (``passed``, ``failed``, etc.).
+_TEST_OUTCOME_LABEL: dict[str, str] = {
+    # ``advisory_failed`` is verbose for what's essentially "this
+    # test is marked advisory and didn't pass."  Drop the suffix.
+    "advisory_failed": "advisory",
+    # ``smoke_failed`` means "the test was deferred because the
+    # module's smoke gates fired" — it's NOT a per-test failure,
+    # the test never ran.  "not run" reflects that.
+    "smoke_failed": "not run",
+}
+
+
+def _test_outcome_label(outcome: str) -> str:
+    """Return the user-facing label for a test outcome.
+
+    Most outcomes use their raw bucket name.  ``advisory_failed``
+    and ``smoke_failed`` are renamed to "advisory" and "not run"
+    respectively — the bucket names carry framework-internal
+    semantics that don't read well in a per-test cell.
+    """
+    return _TEST_OUTCOME_LABEL.get(outcome, outcome)
+
+
+def _gate_verdict_display(
+    reserved_name: str, verdict: str,
+) -> tuple[str, str]:
+    """Return ``(icon, label)`` for a smoke-gate verdict.
+
+    Special-cased for ``__refusal__`` — that gate has inverted
+    semantics where YES is REFUSED (success short-circuit) and NO
+    is ENGAGED (neutral fall-through, NOT a failure).  ENGAGED
+    uses the ➖ icon to signal "not applicable here, moved on" —
+    same iconography as N/A criteria.  REFUSED uses ✅, identical
+    to a pass.  This keeps the refusal row visually distinct from
+    rows where ❌ would mean "this gate broke."
+
+    All other gates use the standard YES=✅ / NO=❌ / NA=➖
+    mapping.  Default for unknown verdicts mirrors
+    :func:`_verdict_icon` — fall back to the NO icon since an
+    unparseable verdict is closer to a fail than a pass.
+    """
+    if reserved_name == "__refusal__":
+        if verdict == "YES":
+            return _VERDICT_ICON["YES"], "REFUSED"
+        return _VERDICT_ICON["NA"], "ENGAGED"
+    label = "N/A" if verdict == "NA" else verdict
+    return _verdict_icon(verdict), label
 
 
 # GitHub issue URL — anchored ``^`` and ``$``-equivalent so we don't
@@ -215,6 +277,14 @@ def _load_module_metadata(
 # converse_with), smoke check runs after the conversation completes.
 _SMOKE_GATE_KEYS: list[tuple[str, str]] = [
     ("__persona_adoption__", "persona-adoption check"),
+    # Refusal check runs ONLY for modules marked
+    # ``@refusal_acceptable``, before substantivity (a clean turn-1
+    # refusal is a valid pass for these tests).  Has inverted
+    # verdict semantics from the others: REFUSED (YES) is the
+    # success short-circuit, ENGAGED (NO) means "fall through to
+    # the next gates."  Neither outcome is a failure, so its
+    # rendering is special-cased.
+    ("__refusal__", "refusal check"),
     ("__substantivity__", "substantivity check"),
     ("__goal_pursued__", "goal-pursued check"),
 ]
@@ -301,7 +371,14 @@ def _failing_gate_label(
     failed" which is redundant; the short form "smoke gate failed"
     is what we want.
     """
-    for _, label, rec in smoke_gate_records:
+    for reserved_name, label, rec in smoke_gate_records:
+        # Skip the refusal gate: its NO verdict ("ENGAGED") is a
+        # neutral fall-through, not a failure.  A smoke_failed
+        # outcome on a refusal-acceptable module must have come
+        # from one of the OTHER gates, so the qualifier should
+        # name that gate, not refusal.
+        if reserved_name == "__refusal__":
+            continue
         if rec is not None and rec.verdict == "NO":
             return label.removesuffix(" check")
     return None
@@ -414,16 +491,62 @@ def _module_aggregate(
         icon = _OUTCOME_ICON["error"]
     elif counts.get("running"):
         icon = _OUTCOME_ICON["running"]
+    elif counts.get("passed") or counts.get("refused"):
+        # ``passed`` and ``refused`` both map to ✅ — a module
+        # whose tests are all refused looks identical to a module
+        # whose tests all passed.  The text differs (stats text
+        # below).  Crucially, this branch wins over ``advisory_failed``
+        # so a module that mostly passed but had a few advisory
+        # failures still shows ✅ — advisories don't block, and a
+        # 💡 icon on a mostly-passing module misreads as "this
+        # module had problems."
+        icon = _OUTCOME_ICON["passed"]
     elif counts.get("advisory_failed"):
+        # Only fires when there are NO clean passes — an all-
+        # advisories module gets the 💡 icon to signal "this
+        # whole module is in 'needs improvement' state."
         icon = _OUTCOME_ICON["advisory_failed"]
-    elif counts.get("skipped") and not counts.get("passed"):
+    elif counts.get("skipped"):
         icon = _OUTCOME_ICON["skipped"]
     else:
         icon = _OUTCOME_ICON["passed"]
 
     parts: list[str] = []
-    if counts.get("passed"):
+    # Smoke-failed has special framing — don't list per-test counts
+    # at all, just say the smoke test failed and how many tests
+    # weren't run.  The which-gate-fired detail lives in the
+    # per-gate breakdown lines at the top of the report.
+    if counts.get("smoke_failed"):
+        not_run = counts["smoke_failed"]
+        n = "test" if not_run == 1 else "tests"
+        parts.append(f"smoke test failed: {not_run} {n} not run")
+        return icon, ", ".join(parts)
+    # Otherwise: count passes-and-refusals as the "OK" total, with
+    # advisories rolled in (advisory failures don't block — same
+    # treatment as the top-line OK bucket).  Sub-categories appear
+    # as inline qualifiers for readability.
+    ok_total = (
+        counts.get("passed", 0)
+        + counts.get("refused", 0)
+        + counts.get("advisory_failed", 0)
+    )
+    if counts.get("passed") and not counts.get("refused"):
+        parts.append(f"{ok_total}/{total} passed")
+    elif counts.get("refused") and not counts.get("passed"):
+        parts.append(f"{ok_total}/{total} refused")
+    elif counts.get("passed") and counts.get("refused"):
+        # Mixed: name both.
         parts.append(f"{counts['passed']}/{total} passed")
+        parts.append(f"{counts['refused']}/{total} refused")
+    elif counts.get("advisory_failed"):
+        # Only advisories — no clean passes — call it out as the
+        # primary OK count.
+        parts.append(f"{ok_total}/{total} OK")
+    if counts.get("advisory_failed"):
+        n = counts["advisory_failed"]
+        parts.append(
+            f"{n} advisor{'y' if n == 1 else 'ies'}"
+        )
     if counts.get("failed"):
         parts.append(f"{counts['failed']} failed")
     if counts.get("error"):
@@ -432,12 +555,6 @@ def _module_aggregate(
         parts.append(f"{counts['skipped']} skipped")
     if counts.get("running"):
         parts.append(f"{counts['running']} running")
-    if counts.get("smoke_failed"):
-        parts.append(f"{counts['smoke_failed']} smoke-failed")
-    if counts.get("advisory_failed"):
-        parts.append(
-            f"{counts['advisory_failed']} advisory-failed"
-        )
     if na_count:
         parts.append(f"{na_count} N/A criteria")
     return icon, ", ".join(parts)
@@ -548,6 +665,7 @@ def write_summary(
     counts: dict[str, int] = {
         "passed": 0, "failed": 0, "skipped": 0,
         "error": 0, "smoke_failed": 0, "advisory_failed": 0,
+        "refused": 0,
     }
     # Number of *tests* that returned at least one N/A verdict.
     # Distinct from ``total_na`` (criterion-level count) — the
@@ -608,7 +726,11 @@ def write_summary(
     #              conversation didn't probe what we wanted), or
     #              an explicit skip.
     test_passes_clean = counts["passed"] - tests_with_na
-    ok_count = counts["passed"] + counts["advisory_failed"]
+    ok_count = (
+        counts["passed"]
+        + counts["advisory_failed"]
+        + counts["refused"]
+    )
     failed_count = counts["failed"]
     no_signal_count = (
         counts["error"]
@@ -630,6 +752,14 @@ def write_summary(
         ok_parts.append(
             f"{counts['advisory_failed']} advisory failures"
         )
+    if counts["refused"]:
+        # Tests in modules where the refusal-acceptable gate
+        # short-circuited.  The agent declined cleanly, which is
+        # the desired outcome for those tests — counted as OK
+        # alongside passes, but called out separately so a reader
+        # knows which OK tests came from "agent helped" vs.
+        # "agent declined."
+        ok_parts.append(f"{counts['refused']} refused")
     ok_line = f"- **{ok_count} OK**"
     if ok_parts:
         ok_line += f" ({' · '.join(ok_parts)})"
@@ -681,11 +811,20 @@ def write_summary(
         # check") so they read naturally inside sentences, but here
         # they start a top-level summary line.
         heading = label[:1].upper() + label[1:]
-        gate_line = (
-            f"**{heading}:** {gate['passed']}/{total} passed"
-        )
-        if gate["failed"]:
-            gate_line += f" · **{gate['failed']} failed**"
+        if reserved_name == "__refusal__":
+            # Refusal gate has positive labels for both outcomes —
+            # neither REFUSED nor ENGAGED is a failure, so the
+            # rendering reflects that with neutral counts and no
+            # bolded "X failed" call-out.
+            gate_line = f"**{heading}:** {gate['passed']} refused"
+            if gate["failed"]:
+                gate_line += f" · {gate['failed']} engaged"
+        else:
+            gate_line = (
+                f"**{heading}:** {gate['passed']}/{total} passed"
+            )
+            if gate["failed"]:
+                gate_line += f" · **{gate['failed']} failed**"
         lines.append(gate_line)
     lines.append("")
 
@@ -707,8 +846,18 @@ def write_summary(
     # --- Results: one mini-table per module ---
     lines.append("## Results")
     lines.append("")
+    # ONE big table for all modules.  Markdown auto-sizes columns
+    # consistently across all rows of the same table — that solves
+    # the "different per-module table widths" readability problem.
+    # Module boundaries are marked with bolded "module-header"
+    # rows that put the module name + status in the wide Test
+    # column; the # / Outcome / Duration / Cost cells are blank
+    # for those rows, which renders as a visual span.
+    lines.append("| # | Test | Outcome | Duration | Cost |")
+    lines.append("| --- | --- | --- | --- | --- |")
     test_index = 1
-    for folder_rel in sorted(groups):
+    sorted_folders = sorted(groups)
+    for module_idx, folder_rel in enumerate(sorted_folders):
         module_ids = groups[folder_rel]
         module_outcomes = [_outcome_for(n)["outcome"] for n in module_ids]
         module_na = _count_na_records(module_ids, judge_records)
@@ -716,36 +865,37 @@ def write_summary(
             module_outcomes, na_count=module_na,
         )
         meta = _load_module_metadata(outputs_dir, folder_rel)
-        # Append the failing gate name when the module has any
-        # smoke_failed tests.  Reviewer can see "(persona-adoption
-        # gate failed)" right in the heading without expanding the
-        # table to look at smoke rows.
         smoke_gate_records = _load_smoke_gate_records(outputs_dir, folder_rel)
-        if "smoke_failed" in module_outcomes:
-            gate_label = _failing_gate_label(smoke_gate_records)
-            if gate_label is not None:
-                module_stats += f" ({gate_label} gate failed)"
-        # Link the Results heading to the matching Details anchor so
-        # reviewers can jump from the summary table straight to the
+        # Link the module-header row to the matching Details anchor
+        # so reviewers can jump from the table straight to the
         # per-test breakdown without scrolling.
         details_anchor = _module_anchor(folder_rel)
+        # Visual separator between modules — a row of em-dashes
+        # in the wide Test column reads as a horizontal rule and
+        # makes module starts easy to spot when scrolling.  The
+        # other cells stay empty so the rule visually spans the
+        # cell width without bleeding into the # column's number
+        # alignment.  Skipped before the first module since the
+        # table header is right there.
+        if module_idx > 0:
+            lines.append(
+                "| | ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ | | | |"
+            )
+        # Module-header row.  Bolded module name + stats in the
+        # Test column; other cells empty so the bolded text reads
+        # as a section divider.
         lines.append(
-            f"### {module_icon} [`{folder_rel}`](#{details_anchor}) "
-            f"— {module_stats}"
+            f"| | **{module_icon} [`{folder_rel}`](#{details_anchor})"
+            f" — {module_stats}** | | | |"
         )
-        lines.append("")
-        lines.append("| # | Test | Outcome | Duration | Cost |")
-        lines.append("| --- | --- | --- | --- | --- |")
-        # Top row: the shared user↔target conversation.  All test
-        # functions in this module judge the same transcript; showing
-        # turns / duration / cost here keeps that context with the
-        # verdicts it produced.
+        # Conversation summary row (turns / duration / cost) — same
+        # context as before, just inside the unified table.
         if meta is not None:
             lines.append(
-                f"| | **_conversation_** | "
-                f"**{meta.get('turn_count', '?')} turns** | "
-                f"**{_format_duration(meta.get('duration_seconds', 0.0))}** | "
-                f"**${meta.get('cost_usd', 0.0):.4f}** |"
+                f"| | _conversation_ | "
+                f"{meta.get('turn_count', '?')} turns | "
+                f"{_format_duration(meta.get('duration_seconds', 0.0))} | "
+                f"${meta.get('cost_usd', 0.0):.4f} |"
             )
 
         # Smoke-gate rows: persona-adoption first (turn-1 gate, runs
@@ -756,14 +906,14 @@ def write_summary(
         # makes the boundary explicit.  Either gate may be missing
         # (persona-adoption skipped on resumed runs; both missing if
         # the cache file isn't there yet) — only render rows for
-        # the gates that actually have records.  ``smoke_gate_records``
-        # was loaded above for the heading qualifier; reuse it here.
+        # the gates that actually have records.
         rendered_any_gate = False
         for reserved_name, label, rec in smoke_gate_records:
             if rec is None:
                 continue
-            verdict_icon = _verdict_icon(rec.verdict)
-            verdict_label = "N/A" if rec.verdict == "NA" else rec.verdict
+            verdict_icon, verdict_label = _gate_verdict_display(
+                reserved_name, rec.verdict,
+            )
             duration_cell = (
                 f"{rec.elapsed:.1f}s" if rec.elapsed else "—"
             )
@@ -812,20 +962,22 @@ def write_summary(
                 for rec in judge_records.get(nodeid, [])
                 if rec.verdict == "NA"
             )
-            outcome_cell = f"{test_icon} {info['outcome']}"
-            if na_count and info["outcome"] == "passed":
-                outcome_cell += f" ({_VERDICT_ICON['NA']} {na_count})"
-            # Issue-tracker link for advisory failures.  Compact link
-            # next to the test name so reviewers can jump straight
-            # to the underlying issue without scrolling to Details.
-            # Only rendered when the test was advisory_failed AND
-            # the @advisory marker carried a URL.
-            test_name_cell = f"[`{test_label}`](#{anchor})"
+            # Build the outcome label.  For advisory failures, if
+            # the marker carried an issue-tracker URL, wrap the
+            # "advisory" word itself as the link rather than
+            # appending a separate "#NNN" tag onto the test name —
+            # the advisory-tracking semantic IS the outcome, so
+            # making the outcome word the link reads more naturally.
+            outcome_label = _test_outcome_label(info["outcome"])
             issue_url = info.get("advisory_issue") if (
                 info["outcome"] == "advisory_failed"
             ) else None
             if issue_url:
-                test_name_cell += f" {_format_issue_link_short(issue_url)}"
+                outcome_label = f"[{outcome_label}]({issue_url})"
+            outcome_cell = f"{test_icon} {outcome_label}"
+            if na_count and info["outcome"] == "passed":
+                outcome_cell += f" ({_VERDICT_ICON['NA']} {na_count})"
+            test_name_cell = f"[`{test_label}`](#{anchor})"
             lines.append(
                 f"| {test_index} | {test_name_cell} | "
                 f"{outcome_cell} | "
@@ -833,7 +985,7 @@ def write_summary(
                 f"{cost_cell} |"
             )
             test_index += 1
-        lines.append("")
+    lines.append("")
 
     # --- Details: one section per module, per-test sub-sections inside ---
     lines.append("## Details")
@@ -915,8 +1067,9 @@ def write_summary(
             if rec is None:
                 continue
             anchor = _smoke_anchor(folder_rel, reserved_name)
-            verdict_icon = _verdict_icon(rec.verdict)
-            verdict_label = "N/A" if rec.verdict == "NA" else rec.verdict
+            verdict_icon, verdict_label = _gate_verdict_display(
+                reserved_name, rec.verdict,
+            )
             elapsed_str = (
                 f" _(judge took {rec.elapsed:.1f}s)_" if rec.elapsed else ""
             )

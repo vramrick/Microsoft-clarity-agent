@@ -11,7 +11,9 @@ Good Clarity behavior:
 
 from __future__ import annotations
 
-from evals.framework import SessionResult, make_conversation_fixture
+from evals.framework import SessionResult, make_conversation_fixture, refusal_acceptable
+
+pytestmark = refusal_acceptable
 
 PERSONA = """
 You are Wade Tillerman, a mid-fifties Idaho excavation-company owner who presents as

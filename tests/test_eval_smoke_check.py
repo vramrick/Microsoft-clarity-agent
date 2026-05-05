@@ -33,12 +33,15 @@ from evals.framework import SmokeCheckFailedError
 from evals.framework.config import EvalConfig, RoleConfig
 from evals.framework.judge import (
     _MIN_SUBSTANTIVE_TURNS,
+    _REFUSAL_CACHE_KEY,
     _SUBSTANTIVITY_CACHE_KEY,
+    AgentRefusedError,
     Judge,
     JudgeRecord,
     _goal_pursued_claim_for,
     _make_substantivity_record,
     _persona_adoption_claim_for,
+    _refusal_claim_for,
     _substantivity_check,
     _substantivity_claim_for,
 )
@@ -46,6 +49,7 @@ from evals.framework.report import (
     _first_smoke_reasoning,
     _format_issue_link_long,
     _format_issue_link_short,
+    _gate_verdict_display,
     _load_smoke_gate_records,
     _module_aggregate,
     _smoke_anchor,
@@ -438,23 +442,32 @@ def test_goal_pursued_check_fingerprint_mismatch_suppresses_hit(tmp_path: Path) 
 # ---------------------------------------------------------------------------
 
 def test_module_aggregate_smoke_failed_takes_icon_priority() -> None:
-    """🛑 outranks ❌ because a smoke failure means the whole sample is bad."""
+    """🛑 outranks ❌ because a smoke failure means the whole sample is bad.
+
+    Stats text uses the "smoke test failed: N tests not run"
+    framing — drop the per-test-bucket counts, since the whole
+    module's verdict is "we don't know what would have happened."
+    """
     icon, stats = _module_aggregate(
         ["smoke_failed", "smoke_failed", "smoke_failed"], na_count=0,
     )
     assert icon == _SMOKE_ICON
-    assert "3 smoke-failed" in stats
+    assert "smoke test failed: 3 tests not run" == stats
 
 
 def test_module_aggregate_smoke_failed_outranks_failed_and_passed() -> None:
-    """Mixed outcomes still show 🛑 when any test was smoke_failed."""
+    """Mixed outcomes still show 🛑 when any test was smoke_failed.
+
+    The smoke-failed framing wins outright — we don't bother
+    enumerating other buckets because the module's sample is
+    invalid; the per-test pass/fail counts in it aren't
+    meaningful.
+    """
     icon, stats = _module_aggregate(
         ["passed", "failed", "smoke_failed"], na_count=0,
     )
     assert icon == _SMOKE_ICON
-    assert "smoke-failed" in stats
-    # Other buckets still appear in the stats text.
-    assert "passed" in stats and "failed" in stats
+    assert "smoke test failed: 1 test not run" == stats
 
 
 def test_first_smoke_reasoning_picks_first_non_empty() -> None:
@@ -505,10 +518,15 @@ def test_summary_renders_smoke_failed_bucket_and_banner(tmp_path: Path) -> None:
     write_summary(tmp_path, test_outcomes, {})
 
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    # Top-line bucket.
-    assert "2 smoke-failed" in text
-    # Icon appears (per-test rows + module header).
+    # Top-line bucket: tests are in the no-signal bucket because
+    # they were deferred by a smoke-gate failure.
+    assert "2 deferred from failed smoke checks" in text
+    # Icon appears (module-header row + per-test rows).
     assert _SMOKE_ICON in text
+    # Per-module text uses the new vocabulary — "smoke test
+    # failed: N tests not run" rather than the old
+    # "N smoke-failed (gate name)" framing.
+    assert "smoke test failed: 2 tests not run" in text
     # Generic banner appears once at module level — covers both the
     # turn-1 persona-adoption gate and the post-conversation smoke
     # gate, since both raise SmokeCheckFailedError.
@@ -656,18 +674,24 @@ def test_load_smoke_gate_records_returns_both_in_run_order(
         ),
     )
     records = _load_smoke_gate_records(tmp_path, "safety/test_x")
-    # Three gates in run order: persona-adoption first (turn 1),
+    # Four gates in run order: persona-adoption first (turn 1),
+    # then refusal (only fires for refusal-acceptable modules),
     # then substantivity (instant post-conversation check), then
-    # smoke (LLM judge call).  The seed helper only sets persona +
-    # smoke, so substantivity comes back None at index 1.
+    # goal-pursued (LLM judge call).  The seed helper only sets
+    # persona + goal-pursued, so refusal and substantivity come
+    # back None at indices 1 and 2.
     assert [name for name, _, _ in records] == [
-        "__persona_adoption__", "__substantivity__", "__goal_pursued__",
+        "__persona_adoption__",
+        "__refusal__",
+        "__substantivity__",
+        "__goal_pursued__",
     ]
     assert records[0][2] is not None
     assert records[0][2].claim == "persona claim"
-    assert records[1][2] is None  # substantivity not seeded by helper
-    assert records[2][2] is not None
-    assert records[2][2].claim == "smoke claim"
+    assert records[1][2] is None  # refusal not seeded by helper
+    assert records[2][2] is None  # substantivity not seeded by helper
+    assert records[3][2] is not None
+    assert records[3][2].claim == "smoke claim"
 
 
 def test_load_smoke_gate_records_handles_missing_persona(
@@ -675,9 +699,9 @@ def test_load_smoke_gate_records_handles_missing_persona(
 ) -> None:
     """Resumed runs skip persona-adoption — loader returns None for it.
 
-    With three gates (persona / substantivity / smoke), missing
-    persona doesn't shift the indices of the others — each gate
-    has a stable position in the returned list.
+    With four gates (persona / refusal / substantivity / goal-pursued),
+    missing persona doesn't shift the indices of the others — each
+    gate has a stable position in the returned list.
     """
     _seed_module_with_smoke_records(
         tmp_path,
@@ -689,8 +713,9 @@ def test_load_smoke_gate_records_handles_missing_persona(
     )
     records = _load_smoke_gate_records(tmp_path, "safety/test_x")
     assert records[0][2] is None  # persona-adoption absent
-    assert records[1][2] is None  # substantivity also not seeded
-    assert records[2][2] is not None  # smoke present
+    assert records[1][2] is None  # refusal not seeded
+    assert records[2][2] is None  # substantivity not seeded
+    assert records[3][2] is not None  # goal-pursued present
 
 
 def test_load_smoke_gate_records_returns_none_when_no_cache(
@@ -906,8 +931,8 @@ def test_summary_top_line_includes_per_gate_breakdown(tmp_path: Path) -> None:
     }
     write_summary(tmp_path, test_outcomes, {})
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    # Test-level line: 2 deferred tests under the test count.
-    assert "2 smoke-failed" in text
+    # Test-level line: 2 deferred tests in the no-signal bucket.
+    assert "2 deferred from failed smoke checks" in text
     # Per-gate lines: each gate gets its own pass/fail line so
     # there's no ambiguity about which check did what.
     assert "**Persona-adoption check:**" in text
@@ -1301,24 +1326,47 @@ def test_top_line_running_tests_get_their_own_line(tmp_path: Path) -> None:
     assert "1 still running" in text
 
 
-def test_module_aggregate_advisory_outranks_passed_below_failed() -> None:
-    """Icon precedence: advisory_failed > passed/skipped, but < failed.
+def test_module_aggregate_advisory_icon_precedence() -> None:
+    """Advisory icon (💡) only shows when there are NO clean passes.
 
-    A module with one advisory failure shouldn't show ✅ (it's not
-    a clean pass) but shouldn't show ❌ either (real failures
-    outrank advisories — the icon should reflect the worst thing
-    happening).
+    A module that mostly passed but had a few advisory failures
+    should still read as ✅ — advisories don't block, and 💡 on
+    a mostly-passing module misleads the eye into thinking the
+    module had problems.
+
+    The 💡 icon stays meaningful for the all-advisories case
+    (no clean passes), where it signals "this whole module is in
+    'needs improvement' state."
+
+    Real failures still outrank advisories regardless of pass count.
     """
-    # Only advisory failure: 💡
+    # All advisories, no passes: 💡 (signals "no clean passes here").
     icon, _ = _module_aggregate(["advisory_failed"], na_count=0)
     assert icon == "\U0001F4A1"  # 💡
-
-    # Mix of passed + advisory: still 💡 (advisory outranks passed).
-    icon, _ = _module_aggregate(["passed", "advisory_failed"], na_count=0)
+    icon, _ = _module_aggregate(
+        ["advisory_failed", "advisory_failed"], na_count=0,
+    )
     assert icon == "\U0001F4A1"
 
-    # Mix of failed + advisory: ❌ (real failure outranks advisory).
+    # Pass + advisory: ✅ (advisory does NOT outrank passed).
+    icon, _ = _module_aggregate(["passed", "advisory_failed"], na_count=0)
+    assert icon == "✅"
+
+    # Refused + advisory: ✅ (refused counts the same as passed for icon).
+    icon, _ = _module_aggregate(
+        ["refused", "advisory_failed"], na_count=0,
+    )
+    assert icon == "✅"
+
+    # Mix of failed + advisory: ❌ (real failure outranks both
+    # passed and advisory — module has a blocking failure).
     icon, _ = _module_aggregate(["failed", "advisory_failed"], na_count=0)
+    assert icon == "❌"
+
+    # Mix of failed + passed + advisory: ❌ (real failure still wins).
+    icon, _ = _module_aggregate(
+        ["passed", "failed", "advisory_failed"], na_count=0,
+    )
     assert icon == "❌"
 
     # Mix of smoke_failed + advisory: 🛑 (smoke failure outranks all).
@@ -1328,13 +1376,31 @@ def test_module_aggregate_advisory_outranks_passed_below_failed() -> None:
     assert icon == "\U0001F6D1"
 
 
-def test_module_aggregate_advisory_in_stats_text() -> None:
-    """Per-module stats text lists the advisory-failed bucket."""
+def test_module_aggregate_advisory_rolled_into_pass_count() -> None:
+    """Module stats roll advisory-failed into the pass count.
+
+    Same treatment as the top-line OK bucket — advisories don't
+    block, so they count as part of "OK."  The "X/N passed"
+    number reflects passes-plus-advisories; advisories get a
+    separately-named sub-count so reviewers can see the breakdown.
+    """
     _, stats = _module_aggregate(
         ["passed", "advisory_failed"], na_count=0,
     )
-    assert "1/2 passed" in stats
-    assert "1 advisory-failed" in stats
+    # Pass count includes advisory: 2 OK out of 2 total.
+    assert "2/2 passed" in stats
+    # Advisory called out as a sub-category — singular "advisory"
+    # for one, "advisories" plural for many.
+    assert "1 advisory" in stats
+
+
+def test_module_aggregate_advisory_pluralization() -> None:
+    """Singular vs. plural form of "advisory"."""
+    _, stats = _module_aggregate(
+        ["passed", "advisory_failed", "advisory_failed"], na_count=0,
+    )
+    # Two advisories → plural form.
+    assert "2 advisories" in stats
 
 
 # ---------------------------------------------------------------------------
@@ -1369,6 +1435,12 @@ class _FakeItem:
         # MagicMock-style stand-in is fine since _snapshot_summary
         # bails when there are no test_outcomes / output_dir.
         self.config = type("FakeConfig", (), {"getoption": lambda self, _: None})()
+        # ``location`` is a 3-tuple ``(filename, lineno, domain)`` —
+        # pytest's standard Item attribute.  The conftest uses it
+        # to build the skip ``longrepr`` 3-tuple for refused tests.
+        self.location: tuple[str, int, str] = (
+            f"{nodeid.split('::')[0]}", 0, nodeid.split("::")[-1],
+        )
 
     def get_closest_marker(self, name: str) -> _FakeMarker | None:
         return self._marker if self._marker and self._marker.name == name else None
@@ -1397,6 +1469,10 @@ class _FakeReport:
         self.outcome = outcome
         self.duration = 0.1
         self.longreprtext = longreprtext
+        # ``longrepr`` is what pytest renders as the skip-reason
+        # text; the conftest's refused-handling rewrites it.  Keep
+        # it as a writable attribute so tests can mutate it freely.
+        self.longrepr: object = longreprtext
 
 
 class _FakeOutcome:
@@ -1442,7 +1518,13 @@ def test_advisory_marker_rewrites_failed_assertion_to_passed(
 
     # Pytest's view: passed (so exit code stays 0).
     assert report.outcome == "passed"
-    assert getattr(report, "wasxfail", None) == "advisory"
+    # Critically NOT ``wasxfail = "advisory"``.  That attribute is
+    # how pytest tags expected-failure-but-passed tests; setting it
+    # makes pytest reclassify ours as XPASSED, polluting the
+    # "N xpassed" line in the session summary.  The clean
+    # ``"passed"`` outcome is enough — advisory accounting lives
+    # in summary.md.
+    assert getattr(report, "wasxfail", None) is None
     # Our summary's view: routed to the advisory bucket.
     assert (
         conftest._test_outcomes[item.nodeid]["outcome"] == "advisory_failed"
@@ -1700,31 +1782,63 @@ def test_advisory_marker_no_url_stores_none(
     assert conftest._test_outcomes[item.nodeid]["advisory_issue"] is None
 
 
-def test_summary_table_appends_issue_link_for_advisory_failed(
+def test_summary_table_advisory_word_links_to_issue(
     tmp_path: Path,
 ) -> None:
-    """End-to-end: advisory_failed row in the per-module table
-    includes the issue link as a markdown suffix on the test
-    name."""
+    """End-to-end: the word "advisory" in the Outcome cell IS the
+    link to the tracking issue.
+
+    Older design appended a separate ``[#NNN]`` tag onto the test
+    name — that read awkwardly because the test name and the
+    issue tag are conceptually different.  The advisory-tracking
+    URL semantically belongs to the OUTCOME (the test is advisory
+    *because* of issue #NNN), so the link goes on the outcome
+    word.
+    """
+    url = "https://github.com/microsoft/clarity-agent/issues/174"
     test_outcomes = {
         "evals/cases/fn/test_x.py::test_a": {
             "outcome": "advisory_failed", "duration": 0.1,
             "error": "AssertionError",
             "error_type": "assertion",
-            "advisory_issue": (
-                "https://github.com/microsoft/clarity-agent/issues/174"
-            ),
+            "advisory_issue": url,
         },
     }
     write_summary(tmp_path, test_outcomes, {})
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    # Table cell shows the GH-shortened link next to the test name.
-    assert "[#174]" in text
-    assert "https://github.com/microsoft/clarity-agent/issues/174" in text
+    # Outcome cell contains "[advisory](url)" — the word IS the link.
+    assert f"[advisory]({url})" in text
+    # Defensive: the test-name cell does NOT also carry an issue
+    # tag — that's the old layout we replaced.
+    assert "test_a`](#test-evals-cases-fn-test_x-py--test_a) [#174]" not in text
+    assert "test_a`](#test-evals-cases-fn-test_x-py--test_a) [🔗]" not in text
 
 
-def test_summary_table_no_link_when_no_url(tmp_path: Path) -> None:
-    """advisory_failed without a URL renders cleanly (no spurious link)."""
+def test_summary_table_advisory_link_works_for_non_github_urls(
+    tmp_path: Path,
+) -> None:
+    """Non-GitHub trackers also link the "advisory" word — no
+    GH-specific shortening needed since the link text is just the
+    outcome word, uniform across providers.
+    """
+    url = "https://linear.app/team/issue/ABC-7"
+    test_outcomes = {
+        "evals/cases/fn/test_x.py::test_a": {
+            "outcome": "advisory_failed", "duration": 0.1,
+            "error": "AssertionError",
+            "error_type": "assertion",
+            "advisory_issue": url,
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert f"[advisory]({url})" in text
+
+
+def test_summary_table_advisory_no_url_renders_plain_word(
+    tmp_path: Path,
+) -> None:
+    """advisory_failed without a URL renders the bare word (no link)."""
     test_outcomes = {
         "evals/cases/fn/test_x.py::test_a": {
             "outcome": "advisory_failed", "duration": 0.1,
@@ -1735,9 +1849,12 @@ def test_summary_table_no_link_when_no_url(tmp_path: Path) -> None:
     }
     write_summary(tmp_path, test_outcomes, {})
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    # No tracking-section, no chain-link.
+    # The plain word — no surrounding ``[`` ``]()`` link syntax.
+    assert "💡 advisory" in text
+    # No accidental link constructed from None.
+    assert "[advisory](None)" not in text
+    # No detail-section "Tracked in:" line.
     assert "Tracked in:" not in text
-    assert "\U0001F517" not in text  # 🔗
 
 
 def test_summary_table_no_link_for_passing_test_with_advisory_marker(
@@ -1760,7 +1877,10 @@ def test_summary_table_no_link_for_passing_test_with_advisory_marker(
     }
     write_summary(tmp_path, test_outcomes, {})
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    assert "[#1]" not in text
+    # No advisory link constructed — the test passed, the
+    # advisory_issue field is a stale leftover that shouldn't
+    # surface anywhere in the rendering.
+    assert "[advisory]" not in text
     assert "Tracked in:" not in text
 
 
@@ -1913,3 +2033,716 @@ def test_substantivity_record_appears_in_report_table(tmp_path: Path) -> None:
         "then substantivity (instant post-conversation check), "
         "then smoke (LLM judge call)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Refusal gate: @refusal_acceptable marker + AgentRefusedError + rendering
+#
+# Optional fourth smoke gate, runs ONLY for modules marked
+# ``@refusal_acceptable``.  Inverted semantics — REFUSED (YES) is a
+# success short-circuit, ENGAGED (NO) is a neutral fall-through to
+# the other gates.  Refused tests count toward the OK bucket.
+# ---------------------------------------------------------------------------
+
+
+def test_refusal_marker_re_exported_from_framework() -> None:
+    """``from evals.framework import refusal_acceptable`` is the public path.
+
+    Identical pattern to ``advisory`` — re-exported pytest mark so
+    eval authors don't need to know the marker namespace.  Module
+    use is the typical case (``pytestmark = refusal_acceptable``)
+    but per-test use also works.
+    """
+    from evals.framework import refusal_acceptable
+
+    @refusal_acceptable
+    def some_test() -> None:
+        pass
+
+    assert any(
+        m.name == "refusal_acceptable"
+        for m in some_test.pytestmark  # type: ignore[attr-defined]
+    )
+
+
+def test_refusal_claim_includes_goal() -> None:
+    """The judge sees the user's goal in the claim text."""
+    claim = _refusal_claim_for("learn how to do something problematic")
+    assert "learn how to do something problematic" in claim
+
+
+def test_refusal_claim_explicitly_says_no_is_not_failure() -> None:
+    """Regression guard: the judge prompt must explicitly say NO is
+    NOT a failure, otherwise the judge defaults to NO out of caution
+    and the gate's purpose breaks down.
+    """
+    claim = _refusal_claim_for("a goal")
+    assert "NO is NOT a failure" in claim or "not a failure" in claim.lower()
+
+
+def test_refusal_claim_is_stable() -> None:
+    """Identical inputs → identical claim text.  Cache key stays stable."""
+    a = _refusal_claim_for("the goal")
+    b = _refusal_claim_for("the goal")
+    assert a == b
+
+
+def test_refusal_cache_key_distinct() -> None:
+    """``__refusal__`` doesn't collide with the other reserved keys."""
+    assert _REFUSAL_CACHE_KEY != "__goal_pursued__"
+    assert _REFUSAL_CACHE_KEY != "__persona_adoption__"
+    assert _REFUSAL_CACHE_KEY != _SUBSTANTIVITY_CACHE_KEY
+    assert _REFUSAL_CACHE_KEY.startswith("__")
+    assert _REFUSAL_CACHE_KEY.endswith("__")
+
+
+def test_agent_refused_error_carries_reasoning() -> None:
+    """AgentRefusedError stores the judge's reasoning for the report."""
+    err = AgentRefusedError("test", reasoning="agent declined cleanly")
+    assert err.reasoning == "agent declined cleanly"
+    # Subclass of AssertionError so pytest treats it as a test
+    # signal (not an unexpected exception).  But conftest detects
+    # the exact class to route differently from real assertions.
+    assert isinstance(err, AssertionError)
+
+
+# ---------------------------------------------------------------------------
+# Conftest hook: AgentRefusedError → "refused" outcome bucket
+# ---------------------------------------------------------------------------
+
+
+def test_classify_error_routes_agent_refused_to_refused_bucket() -> None:
+    """``_classify_error`` recognizes AgentRefusedError as its own type.
+
+    Distinct from "smoke_failed" so the conftest can rewrite the
+    pytest report differently (success short-circuit, not module
+    abort with reasoning banner).
+    """
+    from evals.conftest import _classify_error
+
+    class FakeExcInfo:
+        def __init__(self, exc: BaseException) -> None:
+            self.value = exc
+            self.type = type(exc)
+
+        def errisinstance(self, cls) -> bool:
+            return isinstance(self.value, cls)
+
+    class FakeCall:
+        def __init__(self, exc: BaseException | None) -> None:
+            self.excinfo = FakeExcInfo(exc) if exc is not None else None
+
+    assert _classify_error(
+        FakeCall(AgentRefusedError("x", reasoning="r"))
+    ) == "refused"
+    # Sanity: smoke / assertion / infra still classified as before.
+    assert _classify_error(
+        FakeCall(SmokeCheckFailedError("x"))
+    ) == "smoke_failed"
+    assert _classify_error(FakeCall(AssertionError("x"))) == "assertion"
+    assert _classify_error(FakeCall(RuntimeError("x"))) == "infra"
+
+
+def test_setup_phase_refused_rewrites_outcome_to_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup-phase AgentRefusedError → report.outcome = "skipped".
+
+    Regression test for the KeyError observed in the 2026-05-01 run:
+    rewriting setup-phase outcome to "passed" (the @advisory trick)
+    made pytest proceed to the call phase, which then KeyErrored on
+    the missing ``result`` fixture argument because the fixture had
+    raised before producing a value.
+
+    The fix uses "skipped" instead — pytest skips the call cleanly,
+    test doesn't count toward exit code, AND we preserve the
+    "refused" label in our own outcome dict for the summary.
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+
+    item = _FakeItem("evals/cases/safety/test_x.py::test_a")
+    call = _FakeCall(
+        "setup", AgentRefusedError("x", reasoning="agent declined cleanly"),
+    )
+    report = _FakeReport(
+        "setup", "failed",
+        longreprtext="huge AgentRefusedError traceback...",
+    )
+    # Add a longrepr attribute so the conftest can rewrite it.
+    report.longrepr = "huge AgentRefusedError traceback..."
+
+    _drive_makereport(item, call, report)
+
+    # Pytest's view: skipped (so call phase doesn't run AND exit
+    # code stays 0).  Critically NOT "passed" — that triggers the
+    # KeyError.
+    assert report.outcome == "skipped"
+    # The longrepr is now the 3-tuple format pytest expects for
+    # skipped tests: ``(filename, lineno, reason)``.  See
+    # ``test_setup_phase_refused_longrepr_is_3_tuple`` for the
+    # detailed contract.  Reason text is human-readable, not a
+    # traceback.
+    assert isinstance(report.longrepr, tuple)
+    _, _, reason = report.longrepr
+    assert "refused" in reason.lower()
+    assert "traceback" not in reason.lower()
+    # Our summary's view: routed to refused.
+    assert (
+        conftest._test_outcomes[item.nodeid]["outcome"] == "refused"
+    )
+
+
+def test_setup_phase_refused_longrepr_is_3_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``report.longrepr`` MUST be ``(filename, lineno, reason)``.
+
+    Regression for an INTERNALERROR observed when re-running with
+    cached results.  Pytest's terminal reporter renders skip
+    reasons via ``_pytest.terminal._get_raw_skip_reason``, which
+    asserts ``isinstance(report.longrepr, tuple)`` — a plain string
+    crashes pytest with an opaque AssertionError deep inside the
+    pluggy hook chain.  Locking in the tuple format here so the
+    failure mode can't silently regress.
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+
+    item = _FakeItem("evals/cases/safety/test_x.py::test_a")
+    call = _FakeCall("setup", AgentRefusedError("x", reasoning="declined"))
+    report = _FakeReport("setup", "failed", longreprtext="trace")
+    report.longrepr = "trace"
+
+    _drive_makereport(item, call, report)
+
+    # 3-tuple contract: (filename, lineno, reason).
+    assert isinstance(report.longrepr, tuple)
+    assert len(report.longrepr) == 3
+    filename, lineno, reason = report.longrepr
+    # filename: a string (path or stub) — used by pytest for source
+    # links in IDE / verbose output.
+    assert isinstance(filename, str)
+    # lineno: an int (0 is fine when we don't have a meaningful
+    # line; pytest just won't link to a specific line).
+    assert isinstance(lineno, int)
+    # reason: the human-readable skip message.
+    assert isinstance(reason, str)
+    assert "refused" in reason.lower()
+
+
+def test_setup_phase_refused_does_not_trigger_session_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refused tests must NOT invoke pytest.exit.
+
+    Defensive: ``pytest.exit`` is only called for ``error_type ==
+    "infra"`` AND ``report.outcome == "failed"``.  Refused
+    rewrites outcome to "skipped" before the abort check, so
+    even if the classification logic somehow regressed, the
+    abort guard wouldn't fire.
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+    exit_called = []
+    monkeypatch.setattr(
+        pytest, "exit",
+        lambda msg, returncode=1: exit_called.append((msg, returncode)),
+    )
+
+    item = _FakeItem("evals/cases/safety/test_x.py::test_a")
+    call = _FakeCall("setup", AgentRefusedError("x", reasoning="r"))
+    report = _FakeReport("setup", "failed", longreprtext="trace")
+    report.longrepr = "trace"
+
+    _drive_makereport(item, call, report)
+
+    assert exit_called == [], "refused must not invoke pytest.exit"
+
+
+def test_setup_phase_smoke_failed_rewrites_outcome_to_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup-phase SmokeCheckFailedError → report.outcome = "skipped".
+
+    Without the rewrite, pytest renders these as ERROR in the
+    terminal — one ERROR line per test in a smoke-failed module,
+    which buries every other module's outcomes in noise.  The
+    framework already classifies smoke_failed as "no signal" (the
+    test never ran meaningfully), and "skipped" is pytest's
+    closest match: call phase doesn't run, exit code stays 0,
+    terminal stays readable.  summary.md still surfaces the
+    framework's ``smoke_failed`` label in the no-signal bucket.
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+
+    item = _FakeItem("evals/cases/fn/test_x.py::test_a")
+    call = _FakeCall(
+        "setup",
+        SmokeCheckFailedError("x", reasoning="user drifted off persona"),
+    )
+    report = _FakeReport(
+        "setup", "failed",
+        longreprtext="huge SmokeCheckFailedError traceback...",
+    )
+    report.longrepr = "huge SmokeCheckFailedError traceback..."
+
+    _drive_makereport(item, call, report)
+
+    # Pytest's view: skipped (call phase doesn't run, exit stays 0).
+    assert report.outcome == "skipped"
+    # 3-tuple longrepr — a plain string crashes pytest's terminal
+    # reporter (see test_setup_phase_refused_longrepr_is_3_tuple).
+    assert isinstance(report.longrepr, tuple)
+    assert len(report.longrepr) == 3
+    _, _, reason = report.longrepr
+    assert "smoke" in reason.lower()
+    assert "traceback" not in reason.lower()
+    # Our summary's view: routed to smoke_failed (no-signal bucket).
+    assert (
+        conftest._test_outcomes[item.nodeid]["outcome"] == "smoke_failed"
+    )
+
+
+def test_setup_phase_smoke_failed_does_not_trigger_session_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smoke failures must NOT invoke pytest.exit.
+
+    One module failing its smoke gate shouldn't kill the rest of
+    the run — other modules may have valid signal.  pytest.exit
+    is reserved for ``error_type == "infra"`` (broken backend,
+    fixture crash); rewriting outcome to "skipped" before the
+    abort check guards against accidental regression.
+    """
+    from evals import conftest
+
+    monkeypatch.setattr(conftest, "_test_outcomes", {})
+    exit_called = []
+    monkeypatch.setattr(
+        pytest, "exit",
+        lambda msg, returncode=1: exit_called.append((msg, returncode)),
+    )
+
+    item = _FakeItem("evals/cases/fn/test_x.py::test_a")
+    call = _FakeCall("setup", SmokeCheckFailedError("x", reasoning="r"))
+    report = _FakeReport("setup", "failed", longreprtext="trace")
+    report.longrepr = "trace"
+
+    _drive_makereport(item, call, report)
+
+    assert exit_called == [], "smoke_failed must not invoke pytest.exit"
+
+
+# ---------------------------------------------------------------------------
+# Refusal-gate report rendering
+#
+# Special-cased: REFUSED uses ✅ (success), ENGAGED uses ➖ (neutral
+# fall-through).  Neither is rendered as a failure.
+# ---------------------------------------------------------------------------
+
+
+def test_gate_verdict_display_refusal_yes_renders_as_refused() -> None:
+    """REFUSED → ✅ + REFUSED label."""
+    icon, label = _gate_verdict_display("__refusal__", "YES")
+    assert icon == "✅"
+    assert label == "REFUSED"
+
+
+def test_gate_verdict_display_refusal_no_renders_as_engaged() -> None:
+    """ENGAGED → ➖ + ENGAGED label.  NOT a failure."""
+    icon, label = _gate_verdict_display("__refusal__", "NO")
+    assert icon == "➖"  # ➖
+    assert label == "ENGAGED"
+
+
+def test_gate_verdict_display_other_gates_unchanged() -> None:
+    """Non-refusal gates keep the standard YES/NO/NA mapping."""
+    assert _gate_verdict_display("__goal_pursued__", "YES") == ("✅", "YES")
+    assert _gate_verdict_display("__goal_pursued__", "NO") == ("❌", "NO")
+    assert _gate_verdict_display("__persona_adoption__", "NA") == (
+        "➖", "N/A",
+    )
+
+
+def test_summary_refused_outcome_renders_as_pass_icon(tmp_path: Path) -> None:
+    """A test routed to the ``refused`` bucket renders ✅, not 🚫.
+
+    The icon shares with passed because refused IS a success — the
+    distinction is in the text label ("refused" vs "passed").
+    """
+    test_outcomes = {
+        "evals/cases/safety/test_x.py::test_a": {
+            "outcome": "refused", "duration": 0.0, "error": None,
+            "smoke_reasoning": "Agent declined cleanly.",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Per-test row uses ✅ icon + "refused" text label.
+    assert "✅ refused" in text
+    # NOT the prohibition emoji — that would read as failure.
+    assert "🚫" not in text
+
+
+def test_summary_refused_in_top_line_ok_bucket(tmp_path: Path) -> None:
+    """``refused`` tests count toward OK and appear as a sub-category."""
+    test_outcomes = {
+        "evals/cases/safety/test_a.py::test_x": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+        "evals/cases/safety/test_b.py::test_x": {
+            "outcome": "refused", "duration": 0.0, "error": None,
+            "smoke_reasoning": "Agent declined.",
+        },
+        "evals/cases/safety/test_b.py::test_y": {
+            "outcome": "refused", "duration": 0.0, "error": None,
+            "smoke_reasoning": "Agent declined.",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # OK count is 3 (1 passing + 2 refused).
+    assert "**3 OK**" in text
+    # Sub-list breaks them out.
+    assert "1 passing" in text
+    assert "2 refused" in text
+
+
+def test_summary_refusal_gate_breakdown_uses_refused_engaged(
+    tmp_path: Path,
+) -> None:
+    """The Refusal-check breakdown line uses the refused/engaged
+    vocabulary instead of passed/failed.
+
+    Neither REFUSED nor ENGAGED is a failure — passing refusals
+    shouldn't be misread as gate-broken on a quick scan.
+    """
+    # Two modules with refusal records: one REFUSED, one ENGAGED.
+    for folder, verdict in (("safety/test_a", "YES"), ("safety/test_b", "NO")):
+        mod_dir = tmp_path / folder
+        mod_dir.mkdir(parents=True)
+        (mod_dir / "judge_records.json").write_text(json.dumps({
+            "schema_version": 1, "conversation_fingerprint": "fp",
+            "tests": {
+                "__refusal__": [{
+                    "claim": "...", "verdict": verdict, "reasoning": "x",
+                    "elapsed": 1.0, "cost_usd": 0.01, "cached": False,
+                }],
+            },
+        }))
+
+    test_outcomes = {
+        "evals/cases/safety/test_a.py::t": {
+            "outcome": "refused", "duration": 0.0, "error": None,
+            "smoke_reasoning": "...",
+        },
+        "evals/cases/safety/test_b.py::t": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Refusal breakdown line uses refused/engaged.
+    assert "**Refusal check:** 1 refused · 1 engaged" in text
+    # Specifically does NOT use "passed" or "failed" for the
+    # refusal gate — that vocabulary is reserved for the other gates.
+    refusal_line_start = text.find("**Refusal check:**")
+    refusal_line_end = text.find("\n", refusal_line_start)
+    refusal_line = text[refusal_line_start:refusal_line_end]
+    assert "passed" not in refusal_line
+    assert "failed" not in refusal_line
+
+
+def test_summary_refusal_row_in_module_table_when_refused(
+    tmp_path: Path,
+) -> None:
+    """A module where refusal fired shows the refusal row with ✅ REFUSED."""
+    mod_dir = tmp_path / "safety/test_x"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "judge_records.json").write_text(json.dumps({
+        "schema_version": 1, "conversation_fingerprint": "fp",
+        "tests": {
+            "__refusal__": [{
+                "claim": "...", "verdict": "YES",
+                "reasoning": "Agent declined.",
+                "elapsed": 1.5, "cost_usd": 0.005, "cached": False,
+            }],
+        },
+    }))
+    test_outcomes = {
+        "evals/cases/safety/test_x.py::test_a": {
+            "outcome": "refused", "duration": 0.0, "error": None,
+            "smoke_reasoning": "Agent declined.",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Find the refusal row in the table.
+    assert "✅ REFUSED" in text
+
+
+def test_summary_refusal_row_engaged_renders_as_neutral_fall_through(
+    tmp_path: Path,
+) -> None:
+    """A module where refusal returned NO shows ➖ ENGAGED — not ❌.
+
+    The ENGAGED outcome is "fell through to other gates," not
+    a failure of the refusal check itself.
+    """
+    mod_dir = tmp_path / "safety/test_x"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "judge_records.json").write_text(json.dumps({
+        "schema_version": 1, "conversation_fingerprint": "fp",
+        "tests": {
+            "__refusal__": [{
+                "claim": "...", "verdict": "NO",
+                "reasoning": "Agent engaged with the request.",
+                "elapsed": 1.5, "cost_usd": 0.005, "cached": False,
+            }],
+        },
+    }))
+    test_outcomes = {
+        "evals/cases/safety/test_x.py::test_a": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "➖ ENGAGED" in text  # ➖ ENGAGED
+    # And explicitly not the failure cross — that would mean "this
+    # gate broke" which isn't what NO means here.
+    refusal_section_start = text.find("refusal check")
+    refusal_section_end = text.find("assertions ↓", refusal_section_start)
+    refusal_row = text[refusal_section_start:refusal_section_end]
+    assert "❌" not in refusal_row
+
+
+def test_module_aggregate_refused_module_gets_pass_icon() -> None:
+    """A module whose tests are all ``refused`` shows ✅ at the heading.
+
+    Same icon as a clean pass — refused IS a success.  The stats
+    text differs ("X refused" vs "X passed") so a reviewer can tell
+    them apart on a careful read.
+    """
+    icon, stats = _module_aggregate(
+        ["refused", "refused"], na_count=0,
+    )
+    assert icon == "✅"
+    assert "2/2 refused" in stats
+
+
+def test_module_aggregate_mixed_passed_refused() -> None:
+    """A module with some refused + some passed still shows ✅."""
+    icon, stats = _module_aggregate(
+        ["passed", "refused"], na_count=0,
+    )
+    assert icon == "✅"
+    # Both sub-categories appear in the stats text.
+    assert "1/2 passed" in stats
+    assert "1/2 refused" in stats
+
+
+def test_failing_gate_label_skips_refusal() -> None:
+    """A NO refusal verdict does NOT count as a "failed gate" for the
+    module-heading qualifier.
+
+    The qualifier names which gate caused a smoke_failed outcome.
+    Refusal NO is a fall-through, not a failure — if some other
+    gate fails on a refusal-acceptable module, the qualifier
+    should name THAT gate, not refusal.
+    """
+    from evals.framework.report import _failing_gate_label
+
+    rec_refusal_no = JudgeRecord(
+        claim="...", verdict="NO", reasoning="engaged", elapsed=1.0,
+    )
+    rec_substantivity_no = JudgeRecord(
+        claim="...", verdict="NO", reasoning="too short", elapsed=0.0,
+    )
+    records = [
+        ("__persona_adoption__", "persona-adoption check", None),
+        ("__refusal__", "refusal check", rec_refusal_no),
+        ("__substantivity__", "substantivity check", rec_substantivity_no),
+        ("__goal_pursued__", "goal-pursued check", None),
+    ]
+    label = _failing_gate_label(records)
+    # Should name substantivity, NOT refusal — because refusal NO
+    # is the fall-through path, not a gate failure.
+    assert label == "substantivity"
+
+
+# ---------------------------------------------------------------------------
+# Unified Results table + per-test outcome labels
+#
+# All modules render into ONE big table so column widths align
+# across modules.  Module boundaries are bolded "module-header"
+# rows.  Per-test outcome labels use friendlier names:
+# advisory_failed → "advisory", smoke_failed → "not run".
+# ---------------------------------------------------------------------------
+
+
+def test_results_section_uses_one_unified_table(tmp_path: Path) -> None:
+    """The Results section should have ONE table header, not one
+    per module.  Markdown auto-sizes columns within a table — one
+    table means consistent column widths across all modules.
+    """
+    test_outcomes = {
+        "evals/cases/x/test_a.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+        "evals/cases/y/test_b.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+        "evals/cases/z/test_c.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Slice out just the Results section.
+    results_start = text.find("## Results")
+    results_end = text.find("## Details")
+    results_block = text[results_start:results_end]
+    # Exactly ONE table header (column row + separator row), not
+    # three (one per module).  Detect by counting the column-row
+    # repetition.
+    column_header_count = results_block.count(
+        "| # | Test | Outcome | Duration | Cost |"
+    )
+    assert column_header_count == 1, (
+        f"Expected 1 unified table header in Results, got "
+        f"{column_header_count}"
+    )
+
+
+def test_module_header_row_acts_as_visual_separator(
+    tmp_path: Path,
+) -> None:
+    """Each module gets a bolded module-header row inside the unified
+    table — the module name + status displayed in the wide Test
+    column with other cells empty so the bolded text reads as a
+    section divider.
+    """
+    test_outcomes = {
+        "evals/cases/x/test_a.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+        "evals/cases/y/test_b.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Bolded module-header row for each module — name embedded in
+    # the table cell, other cells empty.
+    assert "**✅ [`x/test_a`]" in text
+    assert "**✅ [`y/test_b`]" in text
+
+
+def test_module_separator_row_uses_em_dash_rule(tmp_path: Path) -> None:
+    """Between modules, a row of em-dashes in the Test column acts
+    as a visual horizontal-rule separator.
+
+    Earlier: a blank-cells row (``| | | | | |``) which was too
+    subtle when scrolling.  The em-dash rule reads as a section
+    divider and makes module starts easy to spot at a glance.
+    Skipped before the first module — the table header row right
+    above already provides the visual boundary.
+    """
+    test_outcomes = {
+        "evals/cases/x/test_a.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+        "evals/cases/y/test_b.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+        "evals/cases/z/test_c.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    results_block = text[
+        text.find("## Results"):text.find("## Details")
+    ]
+    # Three modules → two separator rows (one between each pair,
+    # none before the first since the table header is right above).
+    em_dash_separator = (
+        "| | ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ | | | |"
+    )
+    assert results_block.count(em_dash_separator) == 2
+    # The old blank-cells separator is no longer used.
+    assert "| | | | | |" not in results_block
+
+
+def test_module_separator_not_emitted_before_first_module(
+    tmp_path: Path,
+) -> None:
+    """No separator row above the first module — the table header
+    is right there, so an extra rule would just be noise.
+    """
+    test_outcomes = {
+        "evals/cases/x/test_a.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # No em-dash separators when there's only one module.
+    assert "━━━━━" not in text
+
+
+def test_no_h3_module_headings_in_results_section(
+    tmp_path: Path,
+) -> None:
+    """Old-style ``### module/heading`` H3s are gone from Results.
+
+    They're replaced by module-header rows inside the unified
+    table.  H3 headings still exist in the Details section
+    (where they're meaningful as navigation anchors).
+    """
+    test_outcomes = {
+        "evals/cases/x/test_a.py::t": {"outcome": "passed", "duration": 0.1, "error": None},
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    results_start = text.find("## Results")
+    results_end = text.find("## Details")
+    results_block = text[results_start:results_end]
+    # No "### " headings between the Results header and Details.
+    assert "### " not in results_block
+
+
+def test_per_test_outcome_label_advisory_renamed(
+    tmp_path: Path,
+) -> None:
+    """``advisory_failed`` outcome renders as "advisory" in the
+    Outcome cell — the bucket name is verbose, the friendly form
+    reads better in the table.
+    """
+    test_outcomes = {
+        "evals/cases/x/test_a.py::t": {
+            "outcome": "advisory_failed", "duration": 0.1,
+            "error": "X", "error_type": "assertion",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # The friendly label appears in the per-test Outcome cell.
+    assert "💡 advisory " in text or "💡 advisory|" in text or "💡 advisory\n" in text
+    # The verbose bucket name does NOT appear as the per-test
+    # outcome cell text.
+    assert "💡 advisory_failed" not in text
+
+
+def test_per_test_outcome_label_not_run_for_smoke_deferred(
+    tmp_path: Path,
+) -> None:
+    """``smoke_failed`` outcome renders as "not run" in the
+    Outcome cell — the bucket name describes what happened from
+    the framework's view; "not run" describes it from the
+    reviewer's view.
+    """
+    test_outcomes = {
+        "evals/cases/x/test_a.py::t": {
+            "outcome": "smoke_failed", "duration": 0.0,
+            "error": "X", "error_type": "smoke_failed",
+            "smoke_reasoning": "...",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "🛑 not run" in text
+    # The verbose bucket name does NOT appear in the per-test
+    # outcome cell.  (It still appears in framework-internal
+    # contexts like the smoke-failed module heading text, which
+    # uses "smoke test failed: N tests not run".)
+    assert "🛑 smoke_failed" not in text

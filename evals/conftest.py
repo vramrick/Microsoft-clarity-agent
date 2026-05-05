@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from evals.framework import (
+    AgentRefusedError,
     EvalConfig,
     Judge,
     SimulatedUser,
@@ -131,6 +132,17 @@ def pytest_configure(config: pytest.Config) -> None:
         "advisory: a test whose failure is informative but should "
         "not block the suite (no contribution to pytest exit code, "
         "rendered as 💡 advisory-failed in summary.md)",
+    )
+    # Module-level marker: in this test, agent refusal is an
+    # acceptable / desired outcome.  Triggers the optional refusal
+    # gate in make_conversation_fixture before substantivity, and
+    # routes every test in the module to the ``refused`` outcome
+    # (a success flavor) when the agent refused cleanly.
+    config.addinivalue_line(
+        "markers",
+        "refusal_acceptable: refusal-by-the-agent is a valid "
+        "success path for this test/module (rendered as ✅ refused "
+        "in summary.md)",
     )
 
     print_and_exit = bool(config.getoption("--print-config"))
@@ -415,6 +427,11 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001 — hook signature
 def _classify_error(call) -> str:
     """Return the error category for a failed test.
 
+    - ``"refused"`` — the framework's refusal gate fired for a
+      ``@refusal_acceptable`` module.  This is a SUCCESS flavor
+      (the agent refused cleanly, which is the desired outcome
+      for these tests), routed to its own bucket.  Does NOT
+      trigger session abort.
     - ``"smoke_failed"`` — the framework's smoke check rejected the
       module's conversation (drift, role failure, etc.).  Routed to a
       dedicated outcome bucket and does NOT trigger session abort, so
@@ -426,6 +443,8 @@ def _classify_error(call) -> str:
     """
     if call.excinfo is None:
         return "infra"
+    if call.excinfo.errisinstance(AgentRefusedError):
+        return "refused"
     if call.excinfo.errisinstance(SmokeCheckFailedError):
         return "smoke_failed"
     return "assertion" if call.excinfo.type is AssertionError else "infra"
@@ -439,7 +458,13 @@ def _extract_smoke_reasoning(call) -> str | None:
     """
     if call is None or call.excinfo is None:
         return None
-    if not call.excinfo.errisinstance(SmokeCheckFailedError):
+    # Both SmokeCheckFailedError (a failure) and AgentRefusedError
+    # (a success short-circuit) carry a ``reasoning`` attribute the
+    # report renders.  Recognize either so the same downstream
+    # field name works for both.
+    if not call.excinfo.errisinstance(
+        (SmokeCheckFailedError, AgentRefusedError),
+    ):
         return None
     exc = call.excinfo.value
     return getattr(exc, "reasoning", None)
@@ -489,8 +514,15 @@ def pytest_runtest_makereport(item, call):
             # neither pytest's exit code nor its terminal summary's
             # "failed" line.  Our own summary tracks the original
             # failure via ``outcome_label`` above.
+            #
+            # Do NOT set ``report.wasxfail`` here.  It looks like a
+            # convenient way to make ``-v`` print "ADVISORY" next
+            # to the test, but pytest's terminal reporter then
+            # reclassifies the result as XPASSED — polluting the
+            # session line ("12 xpassed") with our advisory tests.
+            # A clean ``"passed"`` outcome is enough; the real
+            # advisory accounting lives in summary.md.
             report.outcome = "passed"
-            report.wasxfail = "advisory"  # surfaces in -v output
             # Optional issue-tracker URL passed to the marker:
             # ``@advisory("https://...")`` (positional) or
             # ``@advisory(issue="https://...")`` (keyword).  Stored
@@ -523,15 +555,24 @@ def pytest_runtest_makereport(item, call):
     elif report.when == "setup" and report.outcome in ("failed", "skipped"):
         # Setup-phase failures usually mean the fixture (backend,
         # conversation runner, etc.) couldn't get the test off the
-        # ground.  Two paths now matter:
+        # ground.  Three paths matter:
         #
-        # 1. SmokeCheckFailedError from the framework smoke check:
-        #    the conversation ran but didn't actually exercise the
-        #    persona's goal.  Reported as ``smoke_failed`` (its own
-        #    bucket), recorded for the whole module, does NOT abort
-        #    the run — other modules' samples may be fine.
+        # 1. AgentRefusedError from the refusal-acceptable gate:
+        #    the agent declined cleanly, which is the desired
+        #    outcome for these tests.  Reported as ``refused`` (a
+        #    SUCCESS flavor), recorded for the whole module.  Like
+        #    smoke_failed, does NOT abort the run, AND does NOT
+        #    contribute to pytest's exit code — we rewrite the
+        #    report outcome to "passed" so pytest sees a clean run.
         #
-        # 2. Any other setup failure: real infrastructure problem
+        # 2. SmokeCheckFailedError from any of the three framework
+        #    gates (persona-adoption, substantivity, goal-pursued):
+        #    the conversation ran but downstream assertions can't
+        #    meaningfully run on it.  Reported as ``smoke_failed``
+        #    (its own bucket), recorded for the whole module, does
+        #    NOT abort the run — other modules' samples may be fine.
+        #
+        # 3. Any other setup failure: real infrastructure problem
         #    (fixture exception, backend crash).  Aborts the session
         #    via pytest.exit so a wedged backend doesn't repeat the
         #    same error once per test in the module.
@@ -539,11 +580,66 @@ def pytest_runtest_makereport(item, call):
             error_type = _classify_error(call)
         else:
             error_type = None
-        outcome_label = (
-            "smoke_failed" if error_type == "smoke_failed"
-            else report.outcome
-        )
         smoke_reasoning = _extract_smoke_reasoning(call)
+        if error_type == "refused":
+            outcome_label = "refused"
+            # Pytest skip semantics: setup-skipped → call phase
+            # doesn't run, test doesn't count toward failure / exit
+            # code.  We can't use ``"passed"`` here (the @advisory
+            # trick) because passed-setup makes pytest proceed to
+            # the call phase, which then KeyErrors on the missing
+            # ``result`` fixture argument (the fixture raised, so
+            # never produced a value).  Skipped-setup is the right
+            # signal — pytest skips the call cleanly and exits 0.
+            report.outcome = "skipped"
+            # Replace the AgentRefusedError traceback with a short
+            # human-readable reason — pytest renders ``longrepr``
+            # as the skip reason in its terminal output, and we
+            # don't want a stack trace appearing for what is
+            # semantically a success short-circuit.
+            #
+            # Format MUST be a 3-tuple ``(filename, lineno, reason)``
+            # — that's what pytest's ``pytest.skip()`` produces and
+            # what the terminal reporter expects.  A plain string
+            # crashes ``_pytest.terminal._get_raw_skip_reason`` with
+            # an AssertionError because that helper does
+            # ``assert isinstance(report.longrepr, tuple)``.
+            short_reason = smoke_reasoning or "agent refused"
+            location = getattr(item, "location", None)
+            if location and len(location) >= 2:
+                filename, lineno = location[0], location[1] or 0
+            else:
+                filename, lineno = (
+                    str(getattr(item, "fspath", "<refused>")), 0,
+                )
+            report.longrepr = (
+                filename, lineno, f"refused: {short_reason}",
+            )
+        elif error_type == "smoke_failed":
+            outcome_label = "smoke_failed"
+            # Same skipped-setup trick as the refused branch above:
+            # without rewriting the outcome, pytest renders these as
+            # ERROR in the terminal (one line per test in the module)
+            # which buries the rest of the run.  ``"skipped"`` plus
+            # a short reason matches our own classification — the
+            # test never ran (no signal), the suite isn't blocked,
+            # and pytest's terminal stays readable.  summary.md
+            # still surfaces these as ``smoke_failed`` in the
+            # no-signal bucket.
+            report.outcome = "skipped"
+            short_reason = smoke_reasoning or "smoke check failed"
+            location = getattr(item, "location", None)
+            if location and len(location) >= 2:
+                filename, lineno = location[0], location[1] or 0
+            else:
+                filename, lineno = (
+                    str(getattr(item, "fspath", "<smoke-failed>")), 0,
+                )
+            report.longrepr = (
+                filename, lineno, f"smoke-failed: {short_reason}",
+            )
+        else:
+            outcome_label = report.outcome
         _test_outcomes.setdefault(item.nodeid, {
             "outcome": outcome_label,
             "duration": report.duration,

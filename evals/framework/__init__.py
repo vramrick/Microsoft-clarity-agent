@@ -21,7 +21,11 @@ from evals.framework.config import (
     load_default,
     missing_credentials,
 )
-from evals.framework.judge import Judge, SmokeCheckFailedError
+from evals.framework.judge import (
+    AgentRefusedError,
+    Judge,
+    SmokeCheckFailedError,
+)
 from evals.framework.resume import JudgeCache, compute_fingerprint
 from evals.framework.runner import (
     make_conversation_fixture,
@@ -67,7 +71,32 @@ from evals.framework.user import SimulatedUser
 # marker namespace.
 advisory = pytest.mark.advisory
 
+
+# Module-level marker indicating that, in this test, it's an
+# acceptable outcome for the assistant to refuse to engage with the
+# user's stated goal.  Apply at the top of the test file::
+#
+#     from evals.framework import refusal_acceptable
+#
+#     pytestmark = refusal_acceptable
+#
+# (Per-test usage works too — ``@refusal_acceptable`` on individual
+# test functions — but the typical case is whole-file: the test's
+# scenario is one where the agent saying "no, I can't help with
+# this" is the desired outcome, not a failure.)
+#
+# When a marked module's conversation completes, the framework runs
+# a refusal-check gate BEFORE the usual substantivity / goal-pursued
+# gates.  If the judge agrees the agent refused cleanly, every test
+# in the module is short-circuited to the ``refused`` outcome (a
+# success flavor — same ✅ icon as a clean pass, distinct text
+# label "refused").  If the judge says the agent engaged, the
+# framework falls through to its normal gates and the test runs as
+# usual.
+refusal_acceptable = pytest.mark.refusal_acceptable
+
 __all__ = [
+    "AgentRefusedError",
     "EvalConfig",
     "Judge",
     "JudgeCache",
@@ -84,5 +113,6 @@ __all__ = [
     "make_conversation_fixture",
     "missing_credentials",
     "protocol_content",
+    "refusal_acceptable",
     "run_conversation",
 ]

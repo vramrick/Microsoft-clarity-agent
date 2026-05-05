@@ -41,6 +41,7 @@ import pytest
 from evals.framework.config import EvalConfig
 from evals.framework.judge import (
     _SUBSTANTIVITY_CACHE_KEY,
+    AgentRefusedError,
     SmokeCheckFailedError,
     _make_substantivity_record,
 )
@@ -53,6 +54,35 @@ from evals.framework.user import SimulatedUser
 def _phase(message: str) -> None:
     """Print a phase marker.  Stderr so pytest's stdout capture doesn't hide it."""
     print(f"\n  [eval] {message}", file=sys.stderr, flush=True)
+
+
+def _module_has_marker(request: pytest.FixtureRequest, name: str) -> bool:
+    """Return True if any test in *request*'s module has the given marker.
+
+    Catches both module-level (``pytestmark = refusal_acceptable``)
+    and per-test (``@refusal_acceptable``) usage.  We look at all
+    tests' markers because the conversation fixture is module-scoped
+    — if any test in the module declares the marker, we want the
+    marker's behavior to apply to the shared conversation.
+
+    Returns False if the request doesn't have a session-level
+    iterator we can walk — e.g. some non-standard fixture call
+    paths.  Defensive: never raise from here.
+    """
+    try:
+        for item in request.session.items:
+            # ``item.module`` is defined on pytest.Function (the
+            # subclass for test functions) but not on the abstract
+            # Item base class — getattr with a default so pyright
+            # doesn't complain on the static type AND so non-Function
+            # items (rare hookable subclasses) don't blow up.
+            item_module = getattr(item, "module", None)
+            if item_module is request.module:
+                if item.get_closest_marker(name) is not None:
+                    return True
+        return False
+    except (AttributeError, TypeError):
+        return False
 
 
 @contextmanager
@@ -674,6 +704,38 @@ def make_conversation_fixture(
                         f"Persona-adoption check failed for "
                         f"{display_slug}: {reason}",
                         reasoning=reason,
+                    )
+
+                # Optional refusal gate, only for modules marked
+                # ``@refusal_acceptable``.  Runs BEFORE substantivity
+                # because a clean turn-1 "go away" is a valid pass
+                # for these tests — substantivity's >= 2 turns
+                # threshold would otherwise smoke-fail it.  If the
+                # judge agrees the agent refused cleanly, every
+                # test in the module is short-circuited to the
+                # ``refused`` outcome (a success flavor).  If the
+                # judge says the agent engaged, we fall through to
+                # the normal gates.
+                if _module_has_marker(request, "refusal_acceptable"):
+                    _phase(f"Running refusal check for {display_slug}")
+                    is_refused, refusal_reasoning = judge.refusal_check(
+                        r.transcript, goal=goal,
+                    )
+                    if is_refused:
+                        _phase(
+                            f"Refusal check PASSED for {display_slug} — "
+                            "agent refused cleanly; marking module as refused "
+                            "(success short-circuit)"
+                        )
+                        raise AgentRefusedError(
+                            f"Agent refused for {display_slug}: "
+                            f"{refusal_reasoning}",
+                            reasoning=refusal_reasoning,
+                        )
+                    _phase(
+                        f"Refusal check ENGAGED for {display_slug} — "
+                        "agent engaged with the request; continuing to "
+                        "substantivity / goal-pursued gates"
                     )
 
                 # Substantivity gate.  Pure code, no LLM call —
