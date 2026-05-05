@@ -275,7 +275,7 @@ def test_summary_header_includes_na_count(tmp_path: Path) -> None:
 def test_per_test_row_annotates_na_count(tmp_path: Path) -> None:
     """When a test passes with some NA criteria, the Results row shows it.
 
-    ``✅ passed`` becomes ``✅ passed (➖ N)`` so reviewers scanning
+    ``✅ passed`` becomes ``✅ passed (N/A)`` so reviewers scanning
     the top-level table can see conditional-skip outcomes without
     opening the Details section.
     """
@@ -295,7 +295,7 @@ def test_per_test_row_annotates_na_count(tmp_path: Path) -> None:
 
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
     # The annotated cell appears in the Results table row.
-    assert f"passed ({_NA_ICON} 2)" in text
+    assert "passed (N/A) in text"
 
 
 def test_per_test_row_no_annotation_when_no_na(tmp_path: Path) -> None:

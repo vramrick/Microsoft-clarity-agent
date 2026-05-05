@@ -14,7 +14,6 @@ from __future__ import annotations
 import sys
 import time
 from collections.abc import Callable, Iterator
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +60,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "<DIR>/<category>/<module>/ as the conversation runs — "
             "tail files there to watch progress during long runs.  "
             "A summary.md is written at the root at session end.  "
-            "Default: ./eval-runs/<timestamp>/."
+            "REQUIRED when running tests under evals/cases/ — pytest "
+            "exits with an error at collection time if any eval test "
+            "is collected without this flag.  No default."
         ),
     )
     group.addoption(
@@ -165,6 +166,35 @@ def pytest_configure(config: pytest.Config) -> None:
         pytest.exit("--print-config: done", returncode=0)
 
 
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item],  # noqa: ARG001
+) -> None:
+    """Require ``--output-dir`` whenever an eval test is collected.
+
+    Fails the session loudly at collection time — before any test
+    runs — so the user gets a clear "you forgot the flag" message
+    rather than discovering hours into a long run that nothing
+    was being recorded.
+
+    Mixed sessions (``pytest tests/ evals/cases/...``) without the
+    flag also fail.  Pure unit-test sessions (``pytest tests/``)
+    are unaffected because no item matches the eval-cases prefix.
+    """
+    has_eval_test = any(
+        item.nodeid.startswith("evals/cases/") for item in items
+    )
+    if has_eval_test and not config.getoption("--output-dir"):
+        pytest.exit(
+            "Eval tests require --output-dir=DIR.\n\n"
+            "  Example: pytest evals/cases --output-dir=./eval-runs/my-run\n\n"
+            "Pass a path on the command line and re-run.  We don't "
+            "default to ./eval-runs/<timestamp>/ anymore — too easy "
+            "to miss the directory afterwards, and unit-test runs "
+            "were leaving stray empties behind.",
+            returncode=2,
+        )
+
+
 def pytest_sessionstart(session: pytest.Session) -> None:  # noqa: ARG001
     """Record session start so the summary can report total wall time."""
     global _session_start
@@ -178,11 +208,17 @@ def _snapshot_summary(pytest_config: pytest.Config) -> None:
     judge check, each test outcome, and at session end.  Failures
     are swallowed so a disk-full or permissions issue can't abort
     a running eval.
+
+    No-ops when ``--output-dir`` wasn't given.  This keeps unit-test
+    runs (``pytest tests/``) from generating spurious summary
+    artifacts: the conftest's runtest hooks fire for every test in
+    the session, but without an output directory there's nowhere
+    to write so we just return.
     """
     if not _test_outcomes and not _judge_records:
         return
     outputs_dir = _resolve_output_dir(pytest_config)
-    if not outputs_dir.exists():
+    if outputs_dir is None or not outputs_dir.exists():
         return
     try:
         eval_cfg = load_default()
@@ -210,17 +246,23 @@ def _snapshot_summary(pytest_config: pytest.Config) -> None:
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _resolve_output_dir(config: pytest.Config) -> Path:
+def _resolve_output_dir(config: pytest.Config) -> Path | None:
     """Compute the output directory, caching on *config* so the fixture
     and the session-finish hook see the same path.
+
+    Returns ``None`` when ``--output-dir`` wasn't given.  Callers
+    that need a path either short-circuit (the snapshot/sessionfinish
+    hooks) or surface a clear error before they get here (the
+    ``output_dir`` fixture and the collection guard, both of which
+    fail loudly when an eval test asks for an output dir but none
+    was configured).
     """
     cached = getattr(config, "_eval_output_dir", None)
     if cached is not None:
         return cached
     raw: str | None = config.getoption("--output-dir")
     if not raw:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        raw = f"./eval-runs/{timestamp}"
+        return None
     path = Path(raw).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
     config._eval_output_dir = path  # type: ignore[attr-defined]
@@ -249,10 +291,22 @@ def output_dir(pytestconfig: pytest.Config) -> Path:
     transcripts land there live as the conversation runs.  The
     ``summary.md`` is written at the root at session end.
 
-    Default: ``./eval-runs/<YYYYmmdd-HHMMSS>/``.  Override with
-    ``--output-dir=DIR``.
+    REQUIRED: pass ``--output-dir=DIR`` when running eval tests.
+    The collection guard (``pytest_collection_modifyitems`` below)
+    fails loudly before any test runs if eval tests were collected
+    without the flag, so reaching this fixture without one means a
+    test outside the normal collection path requested it — also
+    a hard error.
     """
-    return _resolve_output_dir(pytestconfig)
+    path = _resolve_output_dir(pytestconfig)
+    if path is None:
+        pytest.exit(
+            "Eval tests require --output-dir=DIR.  This fixture was "
+            "requested without one — pass --output-dir on the pytest "
+            "command line.",
+            returncode=2,
+        )
+    return path
 
 
 @pytest.fixture(scope="session")
@@ -666,7 +720,7 @@ def pytest_sessionfinish(
     if not _test_outcomes and not _judge_records:
         return
     outputs_dir = _resolve_output_dir(session.config)
-    if not outputs_dir.exists():
+    if outputs_dir is None or not outputs_dir.exists():
         return
 
     _snapshot_summary(session.config)
