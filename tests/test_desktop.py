@@ -162,12 +162,37 @@ class TestRunDesktopInstall:
 class TestBuildTauri:
     """``_build_tauri`` command-line composition."""
 
-    def test_ci_macos_skips_dmg(self, tmp_path: Path) -> None:
-        """In CI on macOS, --bundles app is added to skip the DMG bundle.
+    def test_ci_macos_non_release_skips_dmg(self, tmp_path: Path) -> None:
+        """In non-release CI on macOS, --bundles app is added to skip the DMG.
 
-        hdiutil DMG creation is unreliable in headless runners so we verify
-        that the flag is injected rather than relying on it working end-to-end.
+        hdiutil DMG creation is unreliable in headless runners; for PR/dev
+        CI the .app alone is sufficient for build verification, so we verify
+        the flag is injected rather than relying on DMG creation working
+        end-to-end.
         """
+        captured: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs):  # type: ignore[no-untyped-def]
+            captured.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch("clarity_agent.setup.desktop._run_build", side_effect=fake_run), \
+             patch("clarity_agent.setup.desktop._get_target_triple", return_value=""), \
+             patch("clarity_agent.setup.desktop.sys") as mock_sys, \
+             patch.dict(os.environ, {"CI": "true"}):
+            mock_sys.platform = "darwin"
+            _build_tauri(tmp_path, release=False)
+
+        assert captured, "expected _run_build to be called"
+        cmd = captured[0]
+        assert "--bundles" in cmd
+        idx = cmd.index("--bundles")
+        assert cmd[idx + 1] == "app"
+
+    def test_ci_macos_release_includes_dmg(self, tmp_path: Path) -> None:
+        """In release CI on macOS, --bundles is NOT injected so the DMG is
+        produced for ESRP signing / end-user distribution. The Official
+        pipeline relies on this to ship .dmg artifacts."""
         captured: list[list[str]] = []
 
         def fake_run(cmd: list[str], **kwargs):  # type: ignore[no-untyped-def]
@@ -183,9 +208,7 @@ class TestBuildTauri:
 
         assert captured, "expected _run_build to be called"
         cmd = captured[0]
-        assert "--bundles" in cmd
-        idx = cmd.index("--bundles")
-        assert cmd[idx + 1] == "app"
+        assert "--bundles" not in cmd
 
     def test_non_ci_macos_does_not_skip_dmg(self, tmp_path: Path) -> None:
         """Outside CI on macOS, --bundles is not added so Tauri creates all
