@@ -1902,9 +1902,207 @@ def test_summary_details_renders_tracked_in_for_advisory_failed(
     }
     write_summary(tmp_path, test_outcomes, {})
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    assert "**Tracked in:**" in text
+    # Tracked-in is now a top-level bullet under the test heading
+    # (was a paragraph in the old layout); the leading "- " makes
+    # the visual grouping with the rest of the test data clearer.
+    assert "- **Tracked in:**" in text
     # Non-GH URL → full link text.
     assert "https://example.com/tickets/42" in text
+
+
+# ---------------------------------------------------------------------------
+# Details-section structural changes:
+#  - Horizontal rule between modules
+#  - Refused-module banner uses the ✅ flavor, not the 🛑 smoke-failed flavor
+#  - Per-test data renders as a bulleted list so the next test's H4
+#    heading reads as a clear visual break
+# ---------------------------------------------------------------------------
+
+
+def test_details_inserts_horizontal_rule_between_modules(
+    tmp_path: Path,
+) -> None:
+    """Each module past the first gets a ``---`` rule above its heading.
+
+    The H3 module heading alone wasn't a strong enough visual
+    break — successive modules ran together when the previous one
+    ended with a long judge reasoning.  The HR pushes the eye to
+    the new module.
+    """
+    test_outcomes = {
+        "evals/cases/a/test_x.py::test_a": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+        "evals/cases/b/test_x.py::test_b": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+        "evals/cases/c/test_x.py::test_c": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Three modules → two HR rules between them in Details (no rule
+    # before the first module, since the H2 "Details" already
+    # marks the boundary).
+    details_section = text[text.index("## Details"):]
+    assert details_section.count("\n---\n") == 2
+
+
+def test_details_no_horizontal_rule_for_single_module(
+    tmp_path: Path,
+) -> None:
+    """One module → no HR.  Inserting a rule before the only
+    module would just be noise."""
+    test_outcomes = {
+        "evals/cases/a/test_x.py::test_a": {
+            "outcome": "passed", "duration": 0.1, "error": None,
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    details_section = text[text.index("## Details"):]
+    assert "\n---\n" not in details_section
+
+
+def test_details_refused_module_uses_positive_banner(
+    tmp_path: Path,
+) -> None:
+    """A ``@refusal_acceptable`` module that hit refusal renders
+    a ✅ "module ended at refusal" banner — NOT the 🛑 "smoke gate
+    failed — module aborted" banner that smoke-failed modules use.
+
+    The 🛑 banner reads as something broke; refusal is the *desired*
+    outcome for these modules, so the banner needs to match the
+    reality (a clean short-circuit) instead of suggesting a fault.
+    """
+    # Seed a refusal record on disk so the per-gate detail
+    # subsection renders too — that's the section the banner
+    # references.
+    mod_dir = tmp_path / "safety/test_x"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "judge_records.json").write_text(json.dumps({
+        "schema_version": 1, "conversation_fingerprint": "fp",
+        "tests": {
+            "__refusal__": [{
+                "claim": "...", "verdict": "YES",
+                "reasoning": "Agent declined.",
+                "elapsed": 1.5, "cost_usd": 0.005, "cached": False,
+            }],
+        },
+    }))
+    test_outcomes = {
+        "evals/cases/safety/test_x.py::test_a": {
+            "outcome": "refused", "duration": 0.0, "error": None,
+            "smoke_reasoning": "Agent declined.",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # Positive banner appears.
+    assert "✅ **Module ended at refusal.**" in text
+    # The alarming smoke-failed banner does NOT — would mislead
+    # the reader into thinking something broke.
+    assert "Smoke gate failed" not in text
+    assert "module aborted" not in text
+
+
+def test_details_smoke_failed_module_still_uses_alarming_banner(
+    tmp_path: Path,
+) -> None:
+    """A module that genuinely failed a smoke gate still gets the
+    🛑 banner — the refused special-case shouldn't accidentally
+    suppress the banner for real smoke failures."""
+    test_outcomes = {
+        "evals/cases/fn/test_x.py::test_a": {
+            "outcome": "smoke_failed", "duration": 0.1,
+            "error": "X", "error_type": "smoke_failed",
+            "smoke_reasoning": "user drifted",
+        },
+    }
+    write_summary(tmp_path, test_outcomes, {})
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "🛑 **Smoke gate failed — module aborted.**" in text
+    # And NOT the refused banner.
+    assert "Module ended at refusal" not in text
+
+
+def test_details_per_test_judge_evaluation_renders_as_bulleted_list(
+    tmp_path: Path,
+) -> None:
+    """Test detail body uses bulleted list structure: verdict bullet
+    with criterion+reasoning sub-bullets.
+
+    The flat paragraph format (``**Judge evaluations:**`` header +
+    numbered list with column-0 bold labels) made successive test
+    sections run together visually.  Indented sub-bullets keep all
+    of a test's data inside one block so the next H4 heading at
+    column 0 is a clean break.
+    """
+    nodeid = "evals/cases/fn/test_x.py::test_a"
+    test_outcomes = {
+        nodeid: {"outcome": "passed", "duration": 0.1, "error": None},
+    }
+    judge_records = {
+        nodeid: [
+            JudgeRecord(
+                claim="The agent did the thing.",
+                verdict="YES",
+                reasoning="It clearly did the thing.",
+                elapsed=1.5, cost_usd=0.01,
+            ),
+        ],
+    }
+    write_summary(tmp_path, test_outcomes, judge_records)
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # The verdict is a top-level bullet with criterion + reasoning
+    # as sub-bullets at indent 2.
+    assert "- ✅ **YES**" in text
+    assert "  - **Criterion:** The agent did the thing." in text
+    assert "  - **Reasoning:** It clearly did the thing." in text
+    # The old "Judge evaluations:" header is gone — the bulleted
+    # verdict makes the heading redundant.
+    assert "**Judge evaluations:**" not in text
+
+
+def test_details_indents_multi_line_criterion_inside_bullet(
+    tmp_path: Path,
+) -> None:
+    """Multi-line criterion text stays inside its parent bullet.
+
+    Regression: before ``_indent_continuation``, an embedded
+    ``- `` line in the criterion would break out and render as a
+    sibling bullet — visually destroying the test's grouping and
+    making the ``**Reasoning:**`` field look like part of a
+    different list.
+    """
+    nodeid = "evals/cases/fn/test_x.py::test_a"
+    test_outcomes = {
+        nodeid: {"outcome": "passed", "duration": 0.1, "error": None},
+    }
+    judge_records = {
+        nodeid: [
+            JudgeRecord(
+                claim=(
+                    "Top criterion.\n\n"
+                    "- Sub-point one.\n"
+                    "- Sub-point two."
+                ),
+                verdict="YES",
+                reasoning="ok",
+                elapsed=1.0, cost_usd=0.01,
+            ),
+        ],
+    }
+    write_summary(tmp_path, test_outcomes, judge_records)
+    text = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    # The continuation lines are indented to 4 spaces (parent
+    # sub-bullet sits at indent 2; continuation needs +2).
+    assert "    - Sub-point one." in text
+    assert "    - Sub-point two." in text
+    # Reasoning still renders as a sibling sub-bullet of the verdict
+    # bullet, not as a top-level bullet adrift from the parent.
+    assert "  - **Reasoning:** ok" in text
 
 
 # ---------------------------------------------------------------------------

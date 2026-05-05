@@ -184,6 +184,113 @@ def test_extract_status_unrecognized_value_defaults_to_ongoing() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Trailing same-line STATUS marker (regression: was leaking through to target)
+#
+# In observed runs the user LLM frequently emits the marker on the
+# same line as the body, separated only by a sentence terminator and
+# a space:
+#
+#     "I've decided I want to pivot. STATUS: ONGOING"
+#
+# The original parser only recognized markers on their own lines, so
+# the trailing form went unstripped and the target agent saw the raw
+# protocol marker in the user's message.  These tests pin the new
+# behavior down so the regression can't return.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("body, intent_str, expected_intent", [
+    # Period before — most common form.
+    ("Help me figure this out.", "ONGOING", _INTENT_ONGOING),
+    # Question mark before.
+    ("Can you help me with this?", "ONGOING", _INTENT_ONGOING),
+    # Exclamation mark before.
+    ("That's great!", "CLOSING", _INTENT_CLOSING),
+    # DONE intent.
+    ("Thanks for the help.", "DONE", _INTENT_DONE),
+])
+def test_extract_status_trailing_same_line_strips_and_terminates(
+    body: str, intent_str: str, expected_intent: str,
+) -> None:
+    """Trailing-form STATUS at end of last line is recognized AND
+    stripped from the body — the protocol marker doesn't leak to
+    the target agent."""
+    msg = f"{body} STATUS: {intent_str}"
+    cleaned, intent = _extract_termination_intent(msg)
+    assert intent == expected_intent
+    # Body is preserved exactly minus the trailing marker (and any
+    # whitespace right before it).
+    assert cleaned == body
+
+
+def test_extract_status_trailing_same_line_with_decoration() -> None:
+    """Decoration (brackets, asterisks) on the trailing form is
+    still tolerated.  Same regex applies whether the marker is
+    on its own line or trailing."""
+    for variant in (
+        "[STATUS: DONE]", "**STATUS: DONE**", "STATUS = DONE",
+    ):
+        msg = f"All done here. {variant}"
+        cleaned, intent = _extract_termination_intent(msg)
+        assert intent == _INTENT_DONE, f"failed: {variant!r}"
+        assert cleaned == "All done here.", f"failed: {variant!r}"
+
+
+def test_extract_status_trailing_same_line_no_terminator_left_alone() -> None:
+    """Without sentence-terminator-then-space before the marker,
+    leave the message alone — the regex shouldn't strip mid-prose
+    uses of the word "status".
+
+    Regression guard: a naive "find STATUS at end" would mangle
+    "the status: ongoing" into "the".
+    """
+    cleaned, intent = _extract_termination_intent(
+        "I'd like to update the status: ongoing"
+    )
+    # No boundary before "status" → not a control marker.
+    assert intent == _INTENT_ONGOING
+    assert cleaned == "I'd like to update the status: ongoing"
+
+
+def test_scrub_stray_status_markers_removes_leftover_markers() -> None:
+    """A STATUS marker mid-message (not the protocol's trailing one)
+    is scrubbed before the message goes to the target.
+
+    Defense in depth: if the user LLM emits an extra marker in
+    the body — e.g., quoting the protocol description back at
+    itself — that marker shouldn't reach the target agent."""
+    from evals.framework.user import _scrub_stray_status_markers
+
+    msg = "First sentence.\nSTATUS: ONGOING\nSecond sentence."
+    cleaned, scrubbed = _scrub_stray_status_markers(msg)
+    assert scrubbed
+    assert "STATUS" not in cleaned
+    assert "First sentence." in cleaned
+    assert "Second sentence." in cleaned
+
+
+def test_scrub_stray_status_markers_leaves_in_prose_status_alone() -> None:
+    """Mid-sentence "status: X" without a sentence-boundary before
+    is prose — leave it alone."""
+    from evals.framework.user import _scrub_stray_status_markers
+
+    msg = "I'd set my STATUS: ONGOING for the sprint, sure"
+    cleaned, scrubbed = _scrub_stray_status_markers(msg)
+    assert not scrubbed
+    assert cleaned == msg.rstrip()
+
+
+def test_scrub_stray_status_markers_idempotent_on_clean_message() -> None:
+    """A message with no STATUS markers passes through unchanged."""
+    from evals.framework.user import _scrub_stray_status_markers
+
+    msg = "Plain message body, no protocol markers."
+    cleaned, scrubbed = _scrub_stray_status_markers(msg)
+    assert not scrubbed
+    assert cleaned == msg
+
+
+# ---------------------------------------------------------------------------
 # converse_with — loop semantics around the STATUS protocol
 #
 # These use a scripted backend + target so we can assert the exact

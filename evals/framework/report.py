@@ -239,6 +239,31 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _indent_continuation(text: str, sub_indent: int) -> str:
+    """Indent every line after the first by ``sub_indent`` spaces.
+
+    Used when a multi-line string is rendered as the body of a
+    markdown list item.  CommonMark treats unindented continuation
+    lines as breaking out of the parent list — and any embedded
+    ``- `` line at column 0 starts a sibling list item, which
+    visually destroys the parent's structure.  Indenting every
+    continuation line aligns it with the body of the parent
+    bullet, so embedded bullets become nested children and prose
+    stays inside the same item.
+
+    For sub-bullets at indent 2 (``  - **Criterion:** ...``), pass
+    ``sub_indent=4``.  For top-level bullets at column 0
+    (``- **Criterion:** ...``), pass ``sub_indent=2``.
+    """
+    parts = text.split("\n")
+    if len(parts) <= 1:
+        return text
+    pad = " " * sub_indent
+    return parts[0] + "\n" + "\n".join(
+        (pad + p) if p else p for p in parts[1:]
+    )
+
+
 def _format_duration(seconds: float) -> str:
     """Format a wall-clock duration as ``45.2s`` / ``2m 45s`` / ``1h 02m 45s``."""
     if seconds < 60:
@@ -974,7 +999,13 @@ def write_summary(
     lines.append("## Details")
     lines.append("")
     test_index = 1
-    for folder_rel in sorted(groups):
+    for module_idx, folder_rel in enumerate(sorted(groups)):
+        # Horizontal rule between modules — a stronger visual break
+        # than the H3 heading alone.  Skip before the first module
+        # to avoid a redundant rule right under the H2 "Details".
+        if module_idx > 0:
+            lines.append("---")
+            lines.append("")
         module_ids = groups[folder_rel]
         module_outcomes = [_outcome_for(n)["outcome"] for n in module_ids]
         module_na = _count_na_records(module_ids, judge_records)
@@ -1020,32 +1051,56 @@ def write_summary(
         )
         lines.append("")
 
-        # Smoke-failure banner.  One conversation ⇒ one smoke
-        # verdict, so the failure reasoning only needs to appear
-        # once at the module level even though every test in the
-        # module carries the ``smoke_failed`` outcome.  Both the
-        # turn-1 persona-adoption gate and the post-conversation
-        # smoke gate raise SmokeCheckFailedError, so the banner text
-        # stays generic — the per-gate detail subsections below
-        # show the actual judge record and reasoning.
-        smoke_reasoning = _first_smoke_reasoning(module_ids, test_outcomes)
-        if smoke_reasoning:
+        # Module-level banner.  One conversation ⇒ one short-circuit
+        # verdict, so the explanation appears once at the module
+        # level even though every test in the module carries the
+        # short-circuited outcome.  Two flavors:
+        #
+        # - "refused": ``@refusal_acceptable`` module where the
+        #   refusal gate fired YES — the agent declined cleanly,
+        #   which IS the desired outcome.  Use a positive ✅ banner
+        #   so a reviewer doesn't misread the module as broken.
+        # - "smoke_failed": substantivity, persona-adoption, or
+        #   goal-pursued gate rejected the conversation.  Keep the
+        #   alarming 🛑 banner since this is genuine missing signal.
+        #
+        # Refused has priority: a refused module never has
+        # smoke_failed tests (the refusal gate fires first and
+        # short-circuits the module before substantivity runs).
+        if "refused" in module_outcomes:
+            lines.append(
+                f"{_OUTCOME_ICON['refused']} **Module ended at "
+                "refusal.**  The agent declined cleanly to engage "
+                "with the simulated user's request — the desired "
+                "outcome for this `@refusal_acceptable` module.  "
+                "Subsequent test assertions were not run.  See the "
+                "refusal-check detail below for the judge's "
+                "reasoning."
+            )
+            lines.append("")
+        elif _first_smoke_reasoning(module_ids, test_outcomes):
             lines.append(
                 f"{_OUTCOME_ICON['smoke_failed']} **Smoke gate failed — "
-                "module aborted.**  One of the framework's two smoke "
+                "module aborted.**  One of the framework's smoke "
                 "checks rejected this run; subsequent test assertions "
                 "were not run.  See the smoke-check detail below for "
                 "which gate fired and why."
             )
             lines.append("")
 
-        # Per-gate detail subsections.  Renders both gates that have
-        # records on disk (regardless of pass/fail) at the top of
+        # Per-gate detail subsections.  Renders each gate that has a
+        # record on disk (regardless of pass/fail) at the top of
         # each module's detail section, before the scenario block
         # and the user-test sections.  These are the most
         # information-dense judge calls in the run and worth
         # surfacing prominently.  ``smoke_gate_records`` was loaded
         # above for the heading qualifier; reuse it here.
+        #
+        # Each subsection's body is a bulleted list (verdict,
+        # criterion, reasoning) so that the next subsection's H4
+        # heading reads as a clear visual break — paragraph-style
+        # bodies bled into each other and made successive subsections
+        # hard to scan apart.
         for reserved_name, label, rec in smoke_gate_records:
             if rec is None:
                 continue
@@ -1061,14 +1116,20 @@ def write_summary(
             )
             lines.append("")
             lines.append(
-                f"{verdict_icon} **{verdict_label}**{elapsed_str}"
+                f"- {verdict_icon} **{verdict_label}**{elapsed_str}"
             )
-            lines.append("")
-            lines.append(f"**Criterion:** {_truncate(rec.claim, 1000)}")
-            lines.append("")
+            # ``_indent_continuation(text, 2)`` keeps multi-line
+            # claim/reasoning content inside this top-level bullet.
+            # Without it, embedded markdown bullets in the claim
+            # break out and render as siblings.
+            lines.append(
+                f"- **Criterion:** {_indent_continuation(_truncate(rec.claim, 1000), 2)}"
+            )
             if rec.reasoning:
-                lines.append(f"**Reasoning:** {rec.reasoning}")
-                lines.append("")
+                lines.append(
+                    f"- **Reasoning:** {_indent_continuation(rec.reasoning, 2)}"
+                )
+            lines.append("")
 
         if meta is not None:
             lines.extend(_render_scenario_block(meta))
@@ -1089,45 +1150,47 @@ def write_summary(
             lines.append("")
             test_index += 1
 
-            # Issue-tracker link for advisory failures.  Rendered
-            # right under the heading so reviewers see the tracking
-            # context before the judge reasoning — useful when the
-            # issue contains broader notes that explain WHY this
-            # criterion is currently aspirational.
+            # Per-test body is a bulleted list: tracked-in link
+            # (when advisory), one bullet per judge evaluation with
+            # criterion+reasoning as sub-bullets, and an
+            # infra-error bullet when applicable.  The indentation
+            # makes the boundary to the next test's H4 heading
+            # visually obvious — paragraph-style fields at column 0
+            # made successive tests run together.
             issue_url = info.get("advisory_issue") if (
                 info["outcome"] == "advisory_failed"
             ) else None
             if issue_url:
                 lines.append(
-                    f"**Tracked in:** {_format_issue_link_long(issue_url)}"
+                    f"- **Tracked in:** {_format_issue_link_long(issue_url)}"
                 )
-                lines.append("")
 
-            if records:
-                lines.append("**Judge evaluations:**")
-                lines.append("")
-                for i, rec in enumerate(records, 1):
-                    verdict_icon = _verdict_icon(rec.verdict)
-                    # NA reads better with a "/" in the bold label even
-                    # though we store the canonical "NA" form internally.
-                    verdict_label = "N/A" if rec.verdict == "NA" else rec.verdict
-                    claim = _truncate(rec.claim, 1000)
-                    reasoning = rec.reasoning  # Don't truncate this
-                    if rec.cached:
-                        elapsed_str = " _(cached)_"
-                    elif rec.elapsed:
-                        elapsed_str = f" _(judge took {rec.elapsed:.1f}s)_"
-                    else:
-                        elapsed_str = ""
+            for rec in records:
+                verdict_icon = _verdict_icon(rec.verdict)
+                # NA reads better with a "/" in the bold label even
+                # though we store the canonical "NA" form internally.
+                verdict_label = "N/A" if rec.verdict == "NA" else rec.verdict
+                claim = _truncate(rec.claim, 1000)
+                reasoning = rec.reasoning  # Don't truncate this
+                if rec.cached:
+                    elapsed_str = " _(cached)_"
+                elif rec.elapsed:
+                    elapsed_str = f" _(judge took {rec.elapsed:.1f}s)_"
+                else:
+                    elapsed_str = ""
+                lines.append(
+                    f"- {verdict_icon} **{verdict_label}**{elapsed_str}"
+                )
+                # Sub-bullets sit at indent 2; continuation lines
+                # need indent 4 so embedded markdown bullets stay
+                # inside the sub-bullet rather than breaking out.
+                lines.append(
+                    f"  - **Criterion:** {_indent_continuation(claim, 4)}"
+                )
+                if reasoning:
                     lines.append(
-                        f"{i}. {verdict_icon} **{verdict_label}**{elapsed_str}"
+                        f"  - **Reasoning:** {_indent_continuation(reasoning, 4)}"
                     )
-                    lines.append("")
-                    lines.append(f"   **Criterion:** {claim}")
-                    lines.append("")
-                    if reasoning:
-                        lines.append(f"   **Reasoning:** {reasoning}")
-                        lines.append("")
 
             # Only render infrastructure errors.  Assertion tracebacks
             # are mostly noise — the judge's verdict + reasoning above
@@ -1135,11 +1198,23 @@ def write_summary(
             # and the Python-level traceback adds little beyond that.
             is_infra = info.get("error_type") == "infra"
             if info["outcome"] == "failed" and info.get("error") and is_infra:
-                lines.append("**Infrastructure error (full traceback):**")
+                # Code blocks inside list items: 2-space indent on the
+                # fence + content puts them inside the bullet's body
+                # in CommonMark, keeping the visual grouping.
+                lines.append("- **Infrastructure error (full traceback):**")
                 lines.append("")
-                lines.append("```")
-                lines.append(info["error"])
-                lines.append("```")
+                lines.append("  ```")
+                for err_line in info["error"].splitlines():
+                    lines.append(f"  {err_line}")
+                lines.append("  ```")
+
+            # Spacer after the test's bulleted body so the next H4
+            # heading isn't visually glued to the last sub-bullet.
+            if (issue_url or records or (
+                info["outcome"] == "failed"
+                and info.get("error")
+                and is_infra
+            )):
                 lines.append("")
 
     summary_path = outputs_dir / "summary.md"

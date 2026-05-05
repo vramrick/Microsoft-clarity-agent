@@ -70,6 +70,44 @@ _STATUS_LINE_RE = re.compile(
     r"\[?\*{0,2}\s*status\s*[:=]\s*(ongoing|closing|done)\s*\*{0,2}\]?",
     re.IGNORECASE,
 )
+# Trailing-form STATUS marker: matches at end of the message body
+# whether on its own line or tacked onto the last sentence as a
+# trailing tag.  In practice user-LLMs emit both shapes:
+#
+#   "...help me figure this out. STATUS: ONGOING"   (trailing same line)
+#   "...help me figure this out.\nSTATUS: ONGOING"  (own line)
+#   "...help me figure this out.\n\nSTATUS: DONE"   (blank line then marker)
+#
+# All three are valid protocol forms and all three need to be
+# extracted AND stripped — leaving "STATUS: ONGOING" in the message
+# body sends the control signal verbatim to the target agent, which
+# never asked for it and shouldn't see it.
+#
+# Boundary requirement before the marker: start of string, a newline,
+# or sentence-ending punctuation followed by whitespace.  This
+# prevents in-prose mid-sentence matches like "I'd set my STATUS:
+# ONGOING for the sprint" from being read as a control signal —
+# those have no sentence terminator before "STATUS".
+_STATUS_TRAILING_RE = re.compile(
+    r"(?:\A|(?<=\n)|(?<=[.!?]\s))"
+    r"\s*"
+    r"\[?\*{0,2}\s*status\s*[:=]\s*(ongoing|closing|done)\s*\*{0,2}\]?"
+    r"\s*\Z",
+    re.IGNORECASE,
+)
+# Conservative scrub for stray STATUS markers anywhere in the
+# message body, applied AFTER trailing-intent extraction.  The
+# trailing one is the protocol; any others are spillover that
+# shouldn't reach the target.  Requires the same boundary
+# (start-of-line or sentence terminator + space) so prose mentions
+# like "I'd set my STATUS: ONGOING for the sprint" are left alone.
+_STATUS_STRAY_RE = re.compile(
+    r"(?:^|(?<=[.!?]\s))"
+    r"\s*"
+    r"\[?\*{0,2}\s*status\s*[:=]\s*(?:ongoing|closing|done)\s*\*{0,2}\]?"
+    r"\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 _INTENT_ONGOING = "ongoing"
 _INTENT_CLOSING = "closing"
 _INTENT_DONE = "done"
@@ -252,39 +290,61 @@ def _looks_like_goodbye(message: str) -> bool:
 
 
 def _extract_termination_intent(message: str) -> tuple[str, str]:
-    """Parse a user message for a trailing ``STATUS:`` line.
+    """Parse a user message for a trailing ``STATUS:`` marker.
 
     Returns ``(cleaned_message, intent)`` where intent is one of
     ``"ongoing"``, ``"closing"``, or ``"done"``.  The default
-    (``"ongoing"``) applies when no STATUS line is present at the
+    (``"ongoing"``) applies when no STATUS marker is present at the
     message's end OR the value isn't recognized — both safe-default
     to "keep going" rather than spuriously terminating on garbled
     output.
 
-    The STATUS line is recognized only as the last own-line, with
-    light tolerance for surrounding decoration: ``STATUS: DONE``,
-    ``status: done``, ``[STATUS: CLOSING]``, ``**STATUS: ONGOING**``
-    all parse.  Anything in the middle of the message ("I should set
-    my STATUS: ONGOING for the next sprint") is ignored — only the
-    trailing line counts as a control signal.
+    Recognizes both the own-line form (``"...body.\\nSTATUS: DONE"``)
+    and the trailing-tag form (``"...body. STATUS: DONE"``).  The
+    second form was leaking through the older own-line-only check
+    and the marker was being sent verbatim to the target — which
+    isn't supposed to see the simulator's control protocol.
 
-    The cleaned message has the STATUS line stripped (and any
-    trailing whitespace tidied).  Empty if the message was only the
-    STATUS line.
+    Decoration is tolerated: ``STATUS: DONE``, ``status: done``,
+    ``[STATUS: CLOSING]``, ``**STATUS: ONGOING**`` all parse.
+    Anything in the middle of a sentence ("I should set my STATUS:
+    ONGOING for the next sprint") is ignored — only a trailing
+    marker, after a sentence terminator or own line, counts as a
+    control signal.
+
+    The cleaned message has the STATUS marker stripped along with
+    any whitespace immediately around it.  Empty if the whole
+    message was only the marker.
     """
     if not message:
         return "", _INTENT_ONGOING
     rstripped = message.rstrip()
     if not rstripped:
         return "", _INTENT_ONGOING
-    lines = rstripped.split("\n")
-    last = lines[-1].strip()
-    m = _STATUS_LINE_RE.fullmatch(last)
+    m = _STATUS_TRAILING_RE.search(rstripped)
     if m is None:
         return message, _INTENT_ONGOING
     intent = m.group(1).lower()
-    cleaned = "\n".join(lines[:-1]).rstrip()
+    cleaned = rstripped[: m.start()].rstrip()
     return cleaned, intent
+
+
+def _scrub_stray_status_markers(message: str) -> tuple[str, bool]:
+    """Remove leftover STATUS markers from anywhere else in the body.
+
+    Returns ``(cleaned, was_scrubbed)``.  Run AFTER
+    :func:`_extract_termination_intent` has pulled the trailing
+    protocol marker — anything matching ``STATUS: (ONGOING|CLOSING|
+    DONE)`` after that point is spillover that shouldn't reach the
+    target.  Conservative on boundaries (start-of-line or sentence
+    terminator + space) so prose use of the word "status" mid-
+    sentence is left alone.
+    """
+    cleaned = _STATUS_STRAY_RE.sub("", message)
+    # Tidy up double-blank-lines and trailing whitespace left
+    # behind by the substitution.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip()
+    return cleaned, cleaned != message.rstrip()
 
 
 _PERSONA_REMINDER = (
@@ -702,6 +762,19 @@ class SimulatedUser:
             #     replies once, then break
             cleaned, user_intent = _extract_termination_intent(cleaned)
             user_is_done = user_intent != _INTENT_ONGOING
+
+            # Scrub any stray STATUS markers from elsewhere in the
+            # body.  ``_extract_termination_intent`` only pulls the
+            # trailing one (the protocol signal); user-LLMs that emit
+            # extra markers mid-message would otherwise send them
+            # verbatim to the target, which never asked to see our
+            # control protocol.
+            cleaned, status_scrubbed = _scrub_stray_status_markers(cleaned)
+            if status_scrubbed:
+                _progress(
+                    f"turn {i + 1}/{max_turns}: scrubbed stray STATUS "
+                    "markers from user message body"
+                )
 
             # Remove out-of-character safety disclaimers the user LLM
             # sometimes sticks onto its responses — "Keep in mind I
