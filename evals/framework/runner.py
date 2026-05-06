@@ -824,6 +824,14 @@ def make_conversation_fixture(
                     )
                 yield r
             finally:
+                # Drop on-disk cache entries from earlier runs that
+                # weren't touched this session — typically records
+                # left behind when a smoke-gate or judge claim was
+                # rewritten between runs.  See JudgeCache.prune_unseen
+                # for the full rationale.  Runs after all per-test
+                # judge calls have completed (per pytest's
+                # yield-then-teardown ordering).
+                cache.prune_unseen()
                 judge.set_cache(None)
 
     return _fixture

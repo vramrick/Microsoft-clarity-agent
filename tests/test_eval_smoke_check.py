@@ -1069,6 +1069,94 @@ def test_load_smoke_gate_records_handles_corrupt_json(tmp_path: Path) -> None:
     assert all(rec is None for _, _, rec in records)
 
 
+def test_load_smoke_gate_records_picks_most_recent_by_timestamp(
+    tmp_path: Path,
+) -> None:
+    """When multiple records exist for one reserved key (claim text
+    rewritten between runs), pick the newest by ISO-8601 timestamp.
+
+    Regression: the loader previously took ``entries[0]`` after the
+    on-disk alphabetical-by-claim sort, which had no relationship to
+    recency.  After a smoke-gate claim rewrite, that could render a
+    stale verdict in the summary even when the live judge call had
+    produced the right answer.
+    """
+    module_dir = tmp_path / "safety/test_x"
+    module_dir.mkdir(parents=True)
+    # Two records under __goal_pursued__: an OLD claim with an
+    # earlier timestamp, a NEW claim with a later one.  On disk the
+    # alphabetical sort puts NEW first (N < O), so entries[0] would
+    # actually pick NEW here — but to test the regression cleanly,
+    # craft the alphabetical order to put the OLD record first by
+    # using claims where OLD < NEW alphabetically.
+    (module_dir / "judge_records.json").write_text(json.dumps({
+        "schema_version": 1, "conversation_fingerprint": "fp",
+        "tests": {
+            "__goal_pursued__": [
+                {  # alphabetically first; OLDER timestamp
+                    "claim": "A previous claim wording",
+                    "verdict": "NO",
+                    "reasoning": "stale verdict from old claim",
+                    "elapsed": 1.0, "cost_usd": 0.01, "cached": False,
+                    "timestamp": "2025-01-01T00:00:00+00:00",
+                },
+                {  # alphabetically second; NEWER timestamp
+                    "claim": "Z newer claim wording",
+                    "verdict": "YES",
+                    "reasoning": "current verdict from new claim",
+                    "elapsed": 2.0, "cost_usd": 0.02, "cached": False,
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                },
+            ],
+        },
+    }))
+    records = _load_smoke_gate_records(tmp_path, "safety/test_x")
+    by_name = {name: rec for name, _, rec in records}
+    rec = by_name["__goal_pursued__"]
+    assert rec is not None
+    assert rec.verdict == "YES"
+    assert "current verdict" in rec.reasoning, (
+        "loader picked the alphabetically-first (older) record instead "
+        f"of the most recent: got reasoning={rec.reasoning!r}"
+    )
+
+
+def test_load_smoke_gate_records_falls_back_to_last_when_no_timestamps(
+    tmp_path: Path,
+) -> None:
+    """When no entries have timestamps (older records pre-timestamp
+    field), pick the last entry by position.  Deterministic given
+    JudgeCache's alphabetical-by-claim sort on disk.
+    """
+    module_dir = tmp_path / "safety/test_x"
+    module_dir.mkdir(parents=True)
+    (module_dir / "judge_records.json").write_text(json.dumps({
+        "schema_version": 1, "conversation_fingerprint": "fp",
+        "tests": {
+            "__goal_pursued__": [
+                {
+                    "claim": "A claim",
+                    "verdict": "NO", "reasoning": "first",
+                    "elapsed": 1.0, "cost_usd": 0.01, "cached": False,
+                },
+                {
+                    "claim": "Z claim",
+                    "verdict": "YES", "reasoning": "last",
+                    "elapsed": 2.0, "cost_usd": 0.02, "cached": False,
+                },
+            ],
+        },
+    }))
+    records = _load_smoke_gate_records(tmp_path, "safety/test_x")
+    by_name = {name: rec for name, _, rec in records}
+    rec = by_name["__goal_pursued__"]
+    assert rec is not None
+    assert rec.reasoning == "last", (
+        "fallback should pick last-by-position when no timestamps "
+        f"are present; got {rec.reasoning!r}"
+    )
+
+
 def test_smoke_anchor_distinct_per_gate_and_module() -> None:
     """Anchors don't collide across gates or modules."""
     a = _smoke_anchor("safety/test_x", "__goal_pursued__")

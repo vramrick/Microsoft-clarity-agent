@@ -355,11 +355,38 @@ def _load_smoke_gate_records(
         except (OSError, json.JSONDecodeError):
             tests = {}
 
-    def _first_record(reserved_name: str) -> JudgeRecord | None:
+    def _most_recent_record(reserved_name: str) -> JudgeRecord | None:
+        """Pick the most recently-produced record for *reserved_name*.
+
+        Multiple records can coexist under a single reserved key
+        when the claim text has been rewritten between runs:
+        JudgeCache keys records by ``(test_name, claim)``, so when
+        we revise a smoke-gate claim's wording, the old record stays
+        in the file under its old claim while the new claim's record
+        gets written alongside.  The on-disk entries are then sorted
+        alphabetically by claim for reviewable diffs (see
+        ``JudgeCache._write``), which has no relationship to recency
+        — picking ``entries[0]`` would render whichever claim sorts
+        first lexically, possibly a stale verdict.
+
+        Pick by timestamp instead.  Records carry an ISO-8601 UTC
+        timestamp from when the judge LLM produced them (added in
+        :class:`Judge` when it stores fresh records), and ISO-8601
+        sorts correctly under string comparison.  Fall back to
+        ``entries[-1]`` when no timestamps are present (older
+        records predating that field) — deterministic given the
+        on-disk alphabetical sort.
+        """
         entries = tests.get(reserved_name) or []
         if not entries:
             return None
-        entry = entries[0]
+        entry = max(entries, key=lambda e: e.get("timestamp") or "")
+        if not entry.get("timestamp"):
+            # All entries lack timestamps — ``max`` ties on empty
+            # string and returns the first by position, which on
+            # disk is alphabetically-first-by-claim.  Use the last
+            # entry instead so we get stable behavior.
+            entry = entries[-1]
         try:
             return JudgeRecord(
                 claim=entry["claim"],
@@ -374,7 +401,7 @@ def _load_smoke_gate_records(
             return None
 
     return [
-        (reserved_name, label, _first_record(reserved_name))
+        (reserved_name, label, _most_recent_record(reserved_name))
         for reserved_name, label in _SMOKE_GATE_KEYS
     ]
 
