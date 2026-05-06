@@ -108,7 +108,7 @@ datas = [
     ("src/clarity_agent", "clarity_agent"),
 ]
 if _copilot_bin.exists():
-    datas.append((str(_copilot_bin), str(Path("copilot", "bin"))))
+    datas.append((str(_copilot_bin), "copilot/bin"))
 
 a = Analysis(
     ["clarity.py"],
