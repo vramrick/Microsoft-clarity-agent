@@ -1015,11 +1015,20 @@ def test_looks_like_goodbye_negatives(message: str) -> None:
     )
 
 
-def test_looks_like_goodbye_length_threshold() -> None:
-    """Single long paragraph exceeding the cap doesn't match even with a farewell."""
+def test_looks_like_goodbye_long_message_with_strong_closer_fires() -> None:
+    """Long message ending with a strong closer still fires.
+
+    Regression for the test_rewrite_my_resume cascade: the user-LLM
+    packed its summary of next steps + farewell into a single
+    ~430-char paragraph ending "...Have a great day. Goodbye."  The
+    old whole-message-or-last-paragraph length cap missed it; the
+    trailing-window check on strong closers catches it.  Strong
+    closers are unambiguous enough that length alone shouldn't
+    veto them.
+    """
     long_message = "x " * (_GOODBYE_MAX_LEN // 2 + 5) + "Goodbye!"
     assert len(long_message) > _GOODBYE_MAX_LEN
-    assert _looks_like_goodbye(long_message) is False
+    assert _looks_like_goodbye(long_message) is True
 
 
 def test_looks_like_goodbye_polite_wrapup_with_closing_paragraph() -> None:
@@ -1056,13 +1065,16 @@ def test_looks_like_goodbye_polite_wrapup_with_closing_paragraph() -> None:
     assert _looks_like_goodbye(polite_wrapup) is True
 
 
-def test_looks_like_goodbye_long_closing_paragraph_does_not_fire() -> None:
-    """If the trailing paragraph itself blows the cap, don't fire.
+def test_looks_like_goodbye_long_paragraph_strong_ending_fires() -> None:
+    """A long final paragraph ending with a strong closer DOES fire.
 
-    Defensive: a long, substantive final paragraph that happens to
-    contain a farewell word inside it shouldn't false-positive just
-    because the heuristic now looks at paragraphs.  The cap still
-    protects this case at the paragraph level.
+    The current rule is "is the message ending with a strong
+    closer?" — paragraph length is no longer the gate, since
+    "Goodbye!" at the literal end of the message is a closure
+    regardless of whether the surrounding paragraph is long or
+    short.  The end-of-string anchor on the regex prevents
+    mid-message matches; what's left is exactly the case we want
+    to catch.
     """
     msg = (
         "Earlier discussion paragraph.\n"
@@ -1072,7 +1084,7 @@ def test_looks_like_goodbye_long_closing_paragraph_does_not_fire() -> None:
     )
     last_para_len = len(msg.split("\n\n")[-1])
     assert last_para_len > _GOODBYE_MAX_LEN
-    assert _looks_like_goodbye(msg) is False
+    assert _looks_like_goodbye(msg) is True
 
 
 def test_looks_like_goodbye_mid_message_farewell_paragraph_does_not_fire() -> None:

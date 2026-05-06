@@ -202,26 +202,41 @@ def _strip_safety_disclaimer(message: str) -> tuple[str, bool]:
 # the user LLM forgot to emit a STATUS line.  Word-boundaries + end
 # anchor keep this from false-positiving on mid-conversation phrases
 # that happen to contain "goodbye" or "take care."
-_GOODBYE_PATTERNS = re.compile(
+# Strong closing patterns — unambiguous goodbye signals.  These fire
+# regardless of message length (specifically: anywhere they appear at
+# the end of the trailing-window slice the function checks).  A long
+# polite wrap-up paragraph ending with "...have a great day, goodbye!"
+# is a real closure even though the wrap-up itself blew the per-
+# message length cap that protected ambiguous patterns.
+_GOODBYE_PATTERNS_STRONG = re.compile(
     r"\b("
     r"goodbye(?: for now| then)?"
     r"|bye(?: for now| then)?"
     r"|see you(?: (?:later|soon|around|tomorrow|next time))?"
     r"|take care"
     r"|talk (?:to you )?(?:later|soon)"
-    r"|(?:that'?s|that'?ll be|that is) (?:all|it|enough)"
-    r"(?: (?:for|i need|i needed|i wanted))?"
     r"|i(?:'m| am)(?: all)? (?:set|good|done|finished)(?: (?:here|now|then))?"
-    # Bare "thanks" as a closer — also matches "thanks again", "thanks
-    # so much", and the longer "thanks for your help/time/etc."
-    # variants people often end with.
-    r"|thanks?(?: (?:again|so much|a lot))?"
-    r"(?: for (?:your|the) (?:help|time|insights?|advice|thoughts?))?"
     r"|i'?ll (?:let you go|leave you to it|head out)"
     r"|have a (?:good|great|nice) (?:day|one|evening|night|weekend)"
     r"|gotta (?:go|run|head out)"
     r"|i have to (?:go|run|head out)"
     r"|cheers"
+    r")[\s.!?]*$",
+    re.IGNORECASE,
+)
+
+# Weak/ambiguous closers.  In a short whole message, "Thanks!" or
+# "That's all I needed" reads as a clear hang-up.  In a long
+# substantive message, a trailing "...— thanks." is gratitude, not
+# closure.  Length itself is the distinguishing signal: short
+# messages with these patterns are closures, long messages with
+# them aren't.
+_GOODBYE_PATTERNS_WEAK = re.compile(
+    r"\b("
+    r"thanks?(?: (?:again|so much|a lot))?"
+    r"(?: for (?:your|the) (?:help|time|insights?|advice|thoughts?))?"
+    r"|(?:that'?s|that'?ll be|that is) (?:all|it|enough)"
+    r"(?: (?:for|i need|i needed|i wanted))?"
     r")[\s.!?]*$",
     re.IGNORECASE,
 )
@@ -237,24 +252,35 @@ _GOODBYE_MAX_LEN = 200
 def _looks_like_goodbye(message: str) -> bool:
     """Return True if *message* reads like a natural conversation close.
 
-    Two firing patterns, both requiring an ending farewell:
+    Two firing rules:
 
-    1. The whole message is short (<= ``_GOODBYE_MAX_LEN``) AND ends
-       with one of :data:`_GOODBYE_PATTERNS`.  Catches terse hang-ups
-       like ``"Thanks, bye!"``.
-    2. The whole message may be long, but the LAST PARAGRAPH is
-       short (<= ``_GOODBYE_MAX_LEN``) AND ends with one of the
-       patterns.  Catches the common "polite wrap-up + a clear
-       closing paragraph" shape, where the user summarizes what
-       they're going to do and ends with a short farewell para —
-       which the whole-message check missed because the wrap-up
-       text pushed the total length over the cap.
+    1. **Strong closer in trailing window.**  The trailing
+       ``_GOODBYE_MAX_LEN`` characters end with an unambiguous
+       goodbye signal (``goodbye``, ``bye``, ``take care``, ``have a
+       great day``, etc.).  Fires regardless of total message length.
+       The window is what bounds false positives: a goodbye phrase
+       earlier in a long message won't be in the trailing slice.
+       The regex is anchored to end-of-string so even a strong
+       closer mid-trailing-window doesn't trigger — only one at the
+       very end.
 
-    The "ends with a farewell pattern at paragraph boundary" rule is
-    what keeps both cases from false-positiving on a persona that
-    mentions farewell-shaped phrases mid-dialogue (``"I'll never say
-    goodbye to that idea"``): mid-paragraph mentions don't end a
-    paragraph, so they don't trigger.
+    2. **Weak closer in a short whole message.**  ``Thanks`` /
+       ``that's all`` are real closures when the whole message is
+       short ("Thanks!", "That's all I needed!") but become
+       gratitude rather than goodbye when buried at the end of a
+       substantive paragraph ("...let me think it over and we'll
+       regroup tomorrow with a sharper answer.  Lots of detail
+       still to work through, but I appreciate the conversation —
+       thanks.").  Length is the distinguishing signal: weak
+       patterns require a short whole message to fire.
+
+    Earlier versions split on paragraphs and required the final
+    paragraph to be short.  That missed the realistic case where a
+    user-LLM packs a polite wrap-up ("I'll do X, Y, Z then... have
+    a great day, goodbye!") into a single paragraph longer than the
+    cap.  Rule 1 (trailing window + strong patterns) catches that
+    without requiring the goodbye to be its own paragraph; rule 2
+    keeps the original short-and-grateful hangup case working.
 
     Backup for the ``STATUS:`` protocol: some user LLMs reliably
     produce the structured signal, others produce natural speech
@@ -263,29 +289,20 @@ def _looks_like_goodbye(message: str) -> bool:
     applied to the assistant side — if the target clearly closed,
     don't keep prompting the user-LLM for a reply.  False positives
     cost a few turns (target gets one final reply that closes the
-    conversation early); false negatives are the status quo
-    (conversation runs to max_turns).  Err toward conservative
-    pattern matches to keep false positives rare.
+    conversation early); false negatives leave the conversation
+    burning turns until max_turns.
     """
     stripped = message.strip()
     if not stripped:
         return False
-    # Pattern 1: short whole message ending with a farewell.
-    if (
-        len(stripped) <= _GOODBYE_MAX_LEN
-        and _GOODBYE_PATTERNS.search(stripped)
-    ):
+    # Rule 1: strong closer at end of trailing window.
+    trailing = stripped[-_GOODBYE_MAX_LEN:]
+    if _GOODBYE_PATTERNS_STRONG.search(trailing):
         return True
-    # Pattern 2: long message whose final paragraph is itself a
-    # short farewell.  Split on blank lines (one or more) so the
-    # closing paragraph is isolated even when preceded by a long
-    # multi-paragraph wrap-up.
-    paragraphs = re.split(r"\n\s*\n", stripped)
-    last_para = paragraphs[-1].strip() if paragraphs else ""
+    # Rule 2: weak closer in a whole short message.
     return (
-        bool(last_para)
-        and len(last_para) <= _GOODBYE_MAX_LEN
-        and _GOODBYE_PATTERNS.search(last_para) is not None
+        len(stripped) <= _GOODBYE_MAX_LEN
+        and _GOODBYE_PATTERNS_WEAK.search(stripped) is not None
     )
 
 
@@ -976,6 +993,23 @@ class SimulatedUser:
             f"{situation_section}"
             "## What you want from this conversation\n\n"
             f"{self.goal}\n\n"
+            "## What you do and don't know\n\n"
+            "The persona, situation, and goal sections above "
+            "describe your character — your background, your "
+            "context, your specific facts.  When the assistant "
+            "asks for specifics that ARE described above, USE "
+            "WHAT'S THERE, not a generic substitute.  Don't "
+            "replace a specific role, a specific number, a "
+            "specific event, or any other described detail with "
+            "a more-plausible-feeling version you generate in "
+            "the moment.\n\n"
+            "For details NOT explicitly described above, you can "
+            "fill them in plausibly as your character would, AS "
+            "LONG AS they don't contradict anything that IS "
+            "described.  Inventing a favorite coffee shop your "
+            "persona might frequent is fine.  Substituting a "
+            "different role for one you were given isn't — "
+            "that's the failure mode this section prevents.\n\n"
             "## How to respond\n\n"
             "- Every message you send IS your character speaking to the "
             "assistant.  Don't describe what your character does, don't "
