@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -855,8 +856,9 @@ def test_summary_renders_smoke_failed_bucket_and_banner(tmp_path: Path) -> None:
     # one module and the two tests it skipped.
     assert "**2 failed to run**" in text
     assert "1 module (2 tests) skipped because of smoke test failures" in text
-    # Status reflects the smoke gap — anything not OK is Failed.
-    assert "## Status: Failed" in text
+    # Status reflects the smoke gap — no real failures but a coverage
+    # gap, so the run is "Partially Succeeded" rather than "Failed".
+    assert "## Status: Partially Succeeded" in text
     # Icon appears (module-header row + per-test rows).
     assert _SMOKE_ICON in text
     # Per-module text uses the new vocabulary — "smoke test
@@ -1689,12 +1691,13 @@ def test_status_failed_when_a_real_failure_exists(tmp_path: Path) -> None:
     assert "## Status: Failed" in text
 
 
-def test_status_failed_when_only_failed_to_run(tmp_path: Path) -> None:
-    """No assertion failures but tests didn't produce signal → Failed.
+def test_status_partially_succeeded_when_only_failed_to_run(tmp_path: Path) -> None:
+    """No assertion failures but tests didn't produce signal → Partially Succeeded.
 
     A run with only smoke-failed or infra-errored tests is NOT a
-    clean pass — there's a coverage gap that needs investigation,
-    even if no test ever returned a real ❌.
+    clean pass — there's a coverage gap that needs investigation —
+    but it also isn't a "Failed" run because no test actually
+    returned ❌.  "Partially Succeeded" captures that distinction.
     """
     test_outcomes = {
         "evals/cases/x/test_x.py::test_a": {
@@ -1705,16 +1708,15 @@ def test_status_failed_when_only_failed_to_run(tmp_path: Path) -> None:
     }
     write_summary(tmp_path, test_outcomes, {})
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    assert "## Status: Failed" in text
+    assert "## Status: Partially Succeeded" in text
 
 
-def test_status_in_progress_when_only_running(tmp_path: Path) -> None:
-    """Interrupted run with no recorded outcomes → Status: In progress.
+def test_status_passing_when_only_running(tmp_path: Path) -> None:
+    """In-flight run with no failures so far → Status: Passing.
 
-    Distinct from Passed (no outcomes recorded ≠ all outcomes
-    passed) and from Failed (nothing has actually failed yet).
-    Tells a reviewer skimming an in-flight summary that this is a
-    snapshot, not a verdict.
+    The "-ing" form signals the run is still going and the verdict
+    is provisional.  No failures and no smoke gaps means the run is
+    on track to pass if nothing changes.
     """
     nodeid = "evals/cases/x/test_x.py::test_a"
     judge_records = {
@@ -1726,7 +1728,7 @@ def test_status_in_progress_when_only_running(tmp_path: Path) -> None:
     }
     write_summary(tmp_path, {}, judge_records)
     text = (tmp_path / "summary.md").read_text(encoding="utf-8")
-    assert "## Status: In progress" in text
+    assert "## Status: Passing" in text
 
 
 def test_metadata_line_combines_generated_time_and_cost(
@@ -3369,3 +3371,143 @@ def test_per_test_outcome_label_not_run_for_smoke_deferred(
     # contexts like the smoke-failed module heading text, which
     # uses "smoke test failed: N tests not run".)
     assert "🛑 smoke_failed" not in text
+
+
+# ---------------------------------------------------------------------------
+# pytest_collection_modifyitems — required-flag enforcement
+#
+# The conftest hook fails the session at collection time when any
+# test under ``evals/cases/`` is collected without ``--output-dir``.
+# Mixed sessions with both unit tests and eval tests, and pure
+# unit-test sessions, are also exercised so the hook's eval-test
+# detection (nodeid prefix match) doesn't false-positive on the
+# unit suite.
+# ---------------------------------------------------------------------------
+
+
+def _make_collection_item(nodeid: str) -> _FakeItem:
+    """Minimal fake pytest.Item carrying just a nodeid.
+
+    The collection hook reads only ``item.nodeid`` to classify
+    items as eval-tests vs. unit-tests, so the existing
+    ``_FakeItem`` test-double (which stores nodeid) is enough.
+    """
+    return _FakeItem(nodeid)
+
+
+def _make_collection_config(*, output_dir: str | None) -> Any:
+    """Minimal fake pytest.Config — just ``getoption('--output-dir')``."""
+    class _FakeConfig:
+        def getoption(self, name: str) -> str | None:
+            assert name == "--output-dir", (
+                f"unexpected getoption call: {name!r}"
+            )
+            return output_dir
+    return _FakeConfig()
+
+
+def test_collection_hook_requires_output_dir_for_eval_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An eval test in the session without ``--output-dir`` triggers exit."""
+    from evals.conftest import pytest_collection_modifyitems
+
+    exit_called: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        pytest, "exit",
+        lambda msg, returncode=1: exit_called.append((msg, returncode)),
+    )
+
+    items: list[Any] = [
+        _make_collection_item("evals/cases/safety/test_x.py::test_a"),
+    ]
+    config = _make_collection_config(output_dir=None)
+    pytest_collection_modifyitems(config, items)
+
+    assert exit_called, "expected pytest.exit to fire"
+    msg, returncode = exit_called[0]
+    assert "--output-dir" in msg
+    assert returncode == 2
+
+
+def test_collection_hook_passes_when_output_dir_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--output-dir`` set → eval tests collect cleanly, no exit."""
+    from evals.conftest import pytest_collection_modifyitems
+
+    exit_called: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        pytest, "exit",
+        lambda msg, returncode=1: exit_called.append((msg, returncode)),
+    )
+
+    items: list[Any] = [
+        _make_collection_item("evals/cases/safety/test_x.py::test_a"),
+    ]
+    config = _make_collection_config(output_dir="./eval-runs/my-run")
+    pytest_collection_modifyitems(config, items)
+
+    assert exit_called == [], (
+        "pytest.exit fired despite --output-dir being supplied"
+    )
+
+
+def test_collection_hook_does_not_require_output_dir_for_unit_tests_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pure unit-test sessions are unaffected by the eval-flag check.
+
+    The hook's eval detection is based on the ``evals/cases/``
+    nodeid prefix; unit tests under ``tests/`` shouldn't trigger
+    the requirement.  Regression guard against tightening the
+    detection in a way that catches unit tests too.
+    """
+    from evals.conftest import pytest_collection_modifyitems
+
+    exit_called: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        pytest, "exit",
+        lambda msg, returncode=1: exit_called.append((msg, returncode)),
+    )
+
+    items: list[Any] = [
+        _make_collection_item("tests/test_eval_smoke_check.py::test_a"),
+        _make_collection_item("tests/test_eval_user.py::test_b"),
+    ]
+    config = _make_collection_config(output_dir=None)
+    pytest_collection_modifyitems(config, items)
+
+    assert exit_called == [], (
+        "pytest.exit fired on a pure-unit-test session"
+    )
+
+
+def test_collection_hook_fires_on_mixed_session_without_output_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mixed session (unit + eval) without ``--output-dir`` still fails.
+
+    Catches the case where someone runs ``pytest tests/ evals/cases``
+    expecting the unit suite to run "harmlessly" alongside.  The
+    eval tests need the flag regardless of what else is in the
+    session.
+    """
+    from evals.conftest import pytest_collection_modifyitems
+
+    exit_called: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        pytest, "exit",
+        lambda msg, returncode=1: exit_called.append((msg, returncode)),
+    )
+
+    items: list[Any] = [
+        _make_collection_item("tests/test_eval_smoke_check.py::test_a"),
+        _make_collection_item("evals/cases/safety/test_x.py::test_b"),
+    ]
+    config = _make_collection_config(output_dir=None)
+    pytest_collection_modifyitems(config, items)
+
+    assert exit_called, (
+        "pytest.exit did not fire on a mixed session lacking --output-dir"
+    )

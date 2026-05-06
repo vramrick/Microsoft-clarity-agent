@@ -272,6 +272,16 @@ def _write_test_artifacts(
         "stopped_early": result.stopped_early,
         "timed_out": result.timed_out,
         "duration_seconds": result.duration_seconds,
+        # Captured from the turn-1 persona-adoption gate (run inside
+        # converse_with via opening_validator).  Persisted so resume
+        # can preserve the original gate-failure classification —
+        # without this, a resume of a persona-failed conversation
+        # gets reclassified as a substantivity failure (or whatever
+        # other gate happens to fire on the cached transcript), and
+        # the summary's "which gate failed" label is wrong.  Stored
+        # as ``None`` for conversations where the persona gate
+        # passed; ``_load_session_result`` reads it back.
+        "persona_check_failed": result.persona_check_failed,
         "persona": persona.strip(),
         "situation": situation.strip(),
         "goal": goal.strip(),
@@ -516,6 +526,14 @@ def _load_session_result(project_dir: Path) -> SessionResult | None:
         stopped_early=metadata.get("stopped_early", False),
         timed_out=metadata.get("timed_out", False),
         duration_seconds=metadata.get("duration_seconds", 0.0),
+        # Restore the original turn-1 persona-adoption verdict so
+        # the resume path classifies the smoke-failure the same way
+        # the original run did.  Older metadata files predating
+        # this field default to None (persona gate passed), which
+        # is the same behavior as before this fix — so existing
+        # resumed runs that DIDN'T fail persona-adoption are
+        # unaffected.
+        persona_check_failed=metadata.get("persona_check_failed"),
     )
 
 

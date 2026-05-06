@@ -346,6 +346,29 @@ def _extract_termination_intent(message: str) -> tuple[str, str]:
     return cleaned, intent
 
 
+def _had_status_marker(message: str) -> bool:
+    """Return True if *message* ended with a recognized STATUS marker.
+
+    Distinct from :func:`_extract_termination_intent`, which collapses
+    "no marker" and an explicit ``STATUS: ONGOING`` into the same
+    returned intent (``"ongoing"``).  The conversation loop needs to
+    distinguish them: an explicit ``STATUS: ONGOING`` should suppress
+    the implicit-goodbye heuristic (the user-LLM said "keep going" —
+    respect that even if a farewell phrase is present in the body),
+    while a missing marker should let the heuristic fire as a backup
+    for user-LLMs that don't follow the STATUS protocol at all.
+
+    Cheap — a single regex search; mirrors the one
+    :func:`_extract_termination_intent` does internally.
+    """
+    if not message:
+        return False
+    rstripped = message.rstrip()
+    if not rstripped:
+        return False
+    return _STATUS_TRAILING_RE.search(rstripped) is not None
+
+
 def _scrub_stray_status_markers(message: str) -> tuple[str, bool]:
     """Remove leftover STATUS markers from anywhere else in the body.
 
@@ -777,6 +800,14 @@ class SimulatedUser:
             #   - empty body + (CLOSING|DONE) → break before target
             #   - non-empty body + (CLOSING|DONE) → send, target
             #     replies once, then break
+            # Capture whether the user-LLM emitted any explicit STATUS
+            # marker BEFORE we strip it.  An explicit marker — even
+            # ``STATUS: ONGOING`` — is the user-LLM's authoritative
+            # self-report and should suppress the implicit-goodbye
+            # heuristic below: if the user said "keep going,"
+            # respect that even if a farewell phrase happens to be
+            # in the body.  Used a few lines down.
+            had_explicit_status = _had_status_marker(cleaned)
             cleaned, user_intent = _extract_termination_intent(cleaned)
             user_is_done = user_intent != _INTENT_ONGOING
 
@@ -826,7 +857,19 @@ class SimulatedUser:
             # (regex-detectable farewell at the end).  Only fires when
             # the closing paragraph is short, so in-character
             # mentions of "goodbye" in a long reply don't trip it.
-            if not user_is_done and _looks_like_goodbye(cleaned):
+            #
+            # Skipped when the user-LLM emitted ANY explicit STATUS
+            # marker — including ``STATUS: ONGOING``.  An explicit
+            # ONGOING means "I'm not done; keep going," and the
+            # heuristic shouldn't override that just because the
+            # user-LLM happened to phrase a transition with a
+            # farewell-shaped sentence.  No-marker case still falls
+            # through to the heuristic as before.
+            if (
+                not user_is_done
+                and not had_explicit_status
+                and _looks_like_goodbye(cleaned)
+            ):
                 _progress(
                     f"turn {i + 1}/{max_turns}: detected implicit "
                     "goodbye (no STATUS line) — closing conversation "

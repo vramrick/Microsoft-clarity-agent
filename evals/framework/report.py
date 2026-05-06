@@ -807,12 +807,20 @@ def write_summary(
     # status to Failed because the suite did not produce a complete
     # OK signal.  In-flight tests don't count — an interrupted run
     # is neither passed nor failed yet, so we leave the status off.
-    if running_ids and not (failed_count or failed_to_run_count):
-        lines.append("## Status: In progress")
-    elif failed_count or failed_to_run_count:
+    if running_ids:
+        if failed_count:
+            lines.append("## Status: Failing")
+        elif failed_to_run_count:
+            lines.append("## Status: Partially Succeeding")
+        else:
+            lines.append("## Status: Passing")
+    elif failed_count:
         lines.append("## Status: Failed")
+    elif failed_to_run_count:
+        lines.append("## Status: Partially Succeeded")
     else:
         lines.append("## Status: Passed")
+
     lines.append("")
 
     # Render the bullets.  Each bucket is its own line so a

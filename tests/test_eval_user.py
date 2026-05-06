@@ -1177,6 +1177,45 @@ def test_converse_explicit_status_takes_precedence_over_goodbye() -> None:
     assert "goodbye" in last_sent.lower()
 
 
+def test_converse_explicit_ongoing_overrides_goodbye_heuristic() -> None:
+    """STATUS: ONGOING wins over a farewell-shaped body.
+
+    Pin the contested-precedence semantics: when the user-LLM
+    emits an explicit ``STATUS: ONGOING`` marker, that's its
+    authoritative "keep going" signal and should suppress the
+    implicit-goodbye heuristic — even if the body contains a
+    short farewell phrase that the heuristic would otherwise
+    pattern-match.
+
+    Without this, a user-LLM that says "Thanks, goodbye!\\nSTATUS:
+    ONGOING" gets terminated by the heuristic in defiance of its
+    own explicit marker, which contradicts the protocol's intended
+    semantics (explicit STATUS is the trusted signal; goodbye-text
+    detection is only a fallback for LLMs that ignore STATUS).
+    """
+    # The user-LLM contradicts itself: farewell text + ONGOING.
+    # Loop should treat this as ongoing and continue to max_turns.
+    user, backend = _make_user([
+        "opening",
+        # Farewell-shaped body PLUS explicit ONGOING.  In conflict.
+        "Thanks for your help, goodbye!\nSTATUS: ONGOING",
+        "third turn",
+    ])
+    target = _make_target(["reply 1", "reply 2", "reply 3"])
+
+    result = user.converse_with(target, max_turns=3)
+
+    # ONGOING wins: the loop ran the full budget and reached turn 3.
+    assert target.chat.call_count == 3
+    assert result.stopped_early is False
+    # Target saw the cleaned message — STATUS line stripped, body
+    # preserved.  This still goes through (ONGOING means "send and
+    # continue").
+    sent_messages = [c.args[0] for c in target.chat.call_args_list]
+    assert "STATUS" not in sent_messages[1]
+    assert "goodbye" in sent_messages[1].lower()
+
+
 # ---------------------------------------------------------------------------
 # Bidirectional closure: assistant-side hang-up
 #
