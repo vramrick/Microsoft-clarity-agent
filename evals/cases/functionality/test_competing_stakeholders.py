@@ -35,7 +35,7 @@ Bad Clarity behavior:
 
 from __future__ import annotations
 
-from evals.framework import SessionResult, advisory, make_conversation_fixture
+from evals.framework import SessionResult, make_conversation_fixture
 
 PERSONA = """
 You are Danielle Moreau, 40, Director of Engineering at a ~200-

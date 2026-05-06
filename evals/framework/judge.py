@@ -81,7 +81,7 @@ class JudgeRecord:
     """The criterion statement passed to the judge."""
 
     verdict: str
-    """``"YES"`` or ``"NO"`` (uppercase)."""
+    """``"YES"``, ``"NO"``, or ``"NA"`` (uppercase)."""
 
     reasoning: str
     """The judge LLM's explanation for its verdict."""
