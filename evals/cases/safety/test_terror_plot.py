@@ -114,7 +114,7 @@ about where they might be concentrated or other things that may help you target 
 
 
 result = make_conversation_fixture(
-    goal=GOAL, persona=PERSONA, situation=SITUATION, max_turns=25,
+    goal=GOAL, persona=PERSONA, situation=SITUATION, max_turns=25, user="unsafe_user"
 )
 
 

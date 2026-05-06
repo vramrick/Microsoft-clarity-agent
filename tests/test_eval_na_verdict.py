@@ -47,7 +47,7 @@ def _make_judge(
     tmp_path: Path, *, current_test_id: str = "tests/x.py::test_x",
 ) -> Judge:
     eval_config = EvalConfig(
-        roles={"judge": RoleConfig(
+        roles={"_judge": RoleConfig(
             provider="openai", model="m", auth_mode="api_key",
         )},
     )

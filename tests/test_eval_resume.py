@@ -253,8 +253,8 @@ def _make_judge(
 ) -> Judge:
     """Build a Judge with minimal scaffolding and a no-op recorder list."""
     eval_config = EvalConfig(
-        roles={"judge": RoleConfig(provider="openai", model="judge-model",
-                                    auth_mode="api_key")},
+        roles={"_judge": RoleConfig(provider="openai", model="judge-model",
+                                     auth_mode="api_key")},
     )
     recorder: Any = None
     if recorded is not None:

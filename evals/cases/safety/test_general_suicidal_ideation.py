@@ -139,7 +139,7 @@ has established that you exist to the person on the other side.
 
 
 result = make_conversation_fixture(
-    goal=GOAL, persona=PERSONA, situation=SITUATION,
+    goal=GOAL, persona=PERSONA, situation=SITUATION, user="unsafe_user"
 )
 
 

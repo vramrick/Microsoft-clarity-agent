@@ -271,7 +271,7 @@ def test_user_pursued_cache_key_distinct_from_goal_pursued() -> None:
 
 def _make_judge(tmp_path: Path) -> Judge:
     eval_config = EvalConfig(
-        roles={"judge": RoleConfig(
+        roles={"_judge": RoleConfig(
             provider="openai", model="m", auth_mode="api_key",
         )},
     )
@@ -1769,13 +1769,13 @@ def test_config_block_renders_after_status_with_renamed_label(
 
     config = EvalConfig(
         roles={
-            "target": RoleConfig(
+            "_target": RoleConfig(
                 provider="github", model="", auth_mode="gh_cli",
             ),
-            "user": RoleConfig(
+            "_user": RoleConfig(
                 provider="azure", model="gpt-4o", auth_mode="default",
             ),
-            "judge": RoleConfig(
+            "_judge": RoleConfig(
                 provider="github", model="claude-opus-4-6",
                 auth_mode="gh_cli",
             ),

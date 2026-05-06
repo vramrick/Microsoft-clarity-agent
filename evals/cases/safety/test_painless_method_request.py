@@ -145,7 +145,7 @@ conversation that is honest about the hard parts.
 
 
 result = make_conversation_fixture(
-    goal=GOAL, persona=PERSONA, situation=SITUATION,
+    goal=GOAL, persona=PERSONA, situation=SITUATION, user="unsafe_user"
 )
 
 

@@ -97,6 +97,8 @@ def run_conversation(
     max_turns: int = 15,
     timeout_seconds: float | None = None,
     opening_validator: Callable[[str], tuple[bool, str]] | None = None,
+    target_role: str | None = None,
+    user_role: str | None = None,
 ) -> Iterator[SessionResult]:
     """Run one simulated conversation end-to-end and yield the result.
 
@@ -136,7 +138,8 @@ def run_conversation(
     _phase(f"Conversation working dir (hidden from target): {working_dir}")
 
     target_backend, llm_config = config.create_backend(
-        "target",
+        slot="target",
+        role=target_role,
         project_dir=working_dir,
         clarity_agent_dir=clarity_agent_dir,
     )
@@ -150,7 +153,8 @@ def run_conversation(
         )
         try:
             user_backend, _ = config.create_backend(
-                "user",
+                slot="user",
+                role=user_role,
                 project_dir=working_dir,
                 clarity_agent_dir=clarity_agent_dir,
             )
@@ -524,6 +528,9 @@ def make_conversation_fixture(
     max_turns: int | None = None,
     timeout_seconds: float | None = None,
     slug: str | None = None,
+    target: str | None = None,
+    user: str | None = None,
+    judge: str | None = None,
 ) -> Callable:
     """Build a module-scoped pytest fixture for a shared conversation.
 
@@ -568,7 +575,24 @@ def make_conversation_fixture(
 
     ``slug`` overrides the per-test subdirectory name; defaults to
     ``<category>/<module-stem>`` derived from the test's file path.
+
+    ``target``, ``user``, and ``judge`` (optional) override which model
+    profile to use for that role on this specific eval.  Each must
+    name a profile defined in ``evals/config.yaml`` (i.e., a key under
+    ``models:``).  ``None`` falls back to the reserved default
+    (``_target`` / ``_user`` / ``_judge``).  Use these to route a
+    safety-test eval to a less-safety-tuned user-LLM
+    (``user="unsafe_user"``), point an adversarial test at a stronger
+    judge, etc., without affecting the default profile that other
+    evals continue to use.
     """
+    # Capture overrides in locally-renamed names so the inner fixture
+    # can reference them without shadowing its pytest-injected
+    # ``judge`` fixture parameter (which is the Judge *instance*, not
+    # the role-name override).
+    _target_role_override = target
+    _user_role_override = user
+    _judge_role_override = judge
 
     @pytest.fixture(scope="module")
     def _fixture(
@@ -674,6 +698,8 @@ def make_conversation_fixture(
                 max_turns=effective_max_turns,
                 timeout_seconds=effective_timeout,
                 opening_validator=_persona_validator,
+                target_role=_target_role_override,
+                user_role=_user_role_override,
             )
 
         with conversation_ctx as r:
@@ -696,6 +722,7 @@ def make_conversation_fixture(
                 fingerprint=compute_fingerprint(r.transcript),
             )
             judge.set_cache(cache)
+            judge.set_role(_judge_role_override)
             try:
                 # Turn-1 persona-adoption result, if a fresh
                 # converse_with run flagged it.  Surfaces with the
@@ -833,6 +860,7 @@ def make_conversation_fixture(
                 # yield-then-teardown ordering).
                 cache.prune_unseen()
                 judge.set_cache(None)
+                judge.set_role(None)
 
     return _fixture
 

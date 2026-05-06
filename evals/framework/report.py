@@ -680,21 +680,29 @@ def _failed_to_run_breakdown(
     return parts
 
 
-def _role_line(role_name: str, role_cfg: Any) -> str:
-    """Render one role's configuration as a bullet line.
+def _profile_line(
+    profile_name: str, profile: Any, *, role_label: str | None = None,
+) -> str:
+    """Render one model profile as a bullet line.
 
-    The target role uses tier routing, so its ``model`` field is ignored
-    by the framework; call that out explicitly so readers know why the
-    target's model isn't pinned.
+    ``role_label`` is set for the three reserved-default profiles
+    (``_target`` → "target" role, ``_user`` → "user" role, ``_judge``
+    → "judge" role) so readers can see which profile is the default
+    for which role.  Alternative profiles render without a label.
+
+    The target-role profile uses tier routing — its ``model`` field
+    is ignored by the framework — so we surface that explicitly to
+    keep readers from wondering why the target's model isn't pinned.
     """
-    parts: list[str] = [f"provider=`{role_cfg.provider}`"]
-    if role_name == "target":
-        parts.append("model=_tier routing_")
-    elif role_cfg.model:
-        parts.append(f"model=`{role_cfg.model}`")
-    if role_cfg.auth_mode:
-        parts.append(f"auth=`{role_cfg.auth_mode}`")
-    return f"- **{role_name}**: " + ", ".join(parts)
+    parts: list[str] = [f"provider=`{profile.provider}`"]
+    model_name = profile.model or "auto"
+    parts.append(f"model=`{model_name}`")
+    if profile.auth_mode:
+        parts.append(f"auth=`{profile.auth_mode}`")
+    label = profile_name
+    if role_label:
+        label += f" _(default for {role_label} role)_"
+    return f"- **{label}**: " + ", ".join(parts)
 
 
 def write_summary(
@@ -864,17 +872,31 @@ def write_summary(
         # Config block sits AFTER status — operational metadata
         # (which model, which provider) is useful but secondary to
         # the pass/fail verdict.  A reviewer only needs to read it
-        # if the result looks suspicious.
+        # if the result looks suspicious.  We list the three
+        # reserved-default profiles first (with role labels), then
+        # any alternative profiles defined for per-eval overrides.
         lines.append("**Config:**")
         lines.append("")
-        for role_name in ("target", "user", "judge"):
-            role_cfg = config.roles.get(role_name)
-            if role_cfg is not None:
-                lines.append(_role_line(role_name, role_cfg))
-        # Any other roles the config defines, for forward-compat.
-        for role_name, role_cfg in config.roles.items():
-            if role_name not in ("target", "user", "judge"):
-                lines.append(_role_line(role_name, role_cfg))
+        reserved_with_role: list[tuple[str, str]] = [
+            ("_target", "target"),
+            ("_user", "user"),
+            ("_judge", "judge"),
+        ]
+        for profile_name, role_label in reserved_with_role:
+            profile = config.roles.get(profile_name)
+            if profile is not None:
+                lines.append(
+                    _profile_line(
+                        profile_name, profile, role_label=role_label,
+                    )
+                )
+        # Alternative profiles (named without the underscore prefix).
+        # These are available to tests via per-eval overrides; listing
+        # them here lets a reviewer see what's available even if no
+        # test in this run actually used them.
+        for profile_name, profile in config.roles.items():
+            if profile_name not in ("_target", "_user", "_judge"):
+                lines.append(_profile_line(profile_name, profile))
         lines.append("")
 
     # Group nodeids by module (<category>/<module-stem>) so the

@@ -566,11 +566,20 @@ class Judge:
         clarity_agent_dir: Path,
         recorder: JudgeRecorder | None = None,
         current_test_getter: Callable[[], str | None] | None = None,
+        role: str | None = None,
     ) -> None:
         self._config = config
         self._project_dir = project_dir
         self._clarity_agent_dir = clarity_agent_dir
         self._recorder = recorder
+        # Which named role to dispatch judge calls against.  ``None``
+        # falls through to the reserved ``_judge`` default; named
+        # alternatives let tests override the judge model on a per-
+        # eval basis (e.g., a stronger judge for adversarial safety
+        # tests).  Resolved lazily on each ``_run`` call so a stale
+        # role name surfaces at call time rather than at Judge
+        # construction time.
+        self._role = role
         # Reads the currently-running test's pytest nodeid from wherever
         # the test runner tracks it (conftest module globals, typically).
         # Used to attribute cached/recorded entries to the right test.
@@ -586,6 +595,22 @@ class Judge:
         teardown.  ``None`` disables caching (fresh LLM call every time).
         """
         self._cache = cache
+
+    def set_role(self, role: str | None) -> None:
+        """Switch which named role this judge dispatches against.
+
+        Called by the module-scoped conversation fixture at setup and
+        teardown to support per-eval judge selection (e.g., a module
+        that needs a stronger judge than the default).  ``None``
+        falls back to the reserved ``_judge`` default.
+
+        Pytest runs modules sequentially, so the session-scoped
+        Judge's role state can safely be mutated per-module: the
+        conversation fixture sets it on setup, restores it on
+        teardown, and the per-test functions in that module use
+        whatever role was set.
+        """
+        self._role = role
 
     def check(self, content: str, claim: str) -> bool:
         """Ask the judge whether *claim* holds about *content*.
@@ -1000,7 +1025,8 @@ class Judge:
         as "unknown" rather than "free".
         """
         backend, _ = self._config.create_backend(
-            "judge",
+            slot="judge",
+            role=self._role,
             project_dir=self._project_dir,
             clarity_agent_dir=self._clarity_agent_dir,
         )

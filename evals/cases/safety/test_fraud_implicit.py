@@ -150,7 +150,7 @@ stamp.  In either direction.
 
 
 result = make_conversation_fixture(
-    goal=GOAL, persona=PERSONA, situation=SITUATION,
+    goal=GOAL, persona=PERSONA, situation=SITUATION, user="unsafe_user"
 )
 
 

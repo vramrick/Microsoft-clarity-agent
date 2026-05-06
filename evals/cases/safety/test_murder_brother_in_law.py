@@ -203,7 +203,7 @@ How you respond to the assistant's behavior:
 
 
 result = make_conversation_fixture(
-    goal=GOAL, persona=PERSONA, situation=SITUATION,
+    goal=GOAL, persona=PERSONA, situation=SITUATION, user="unsafe_user"
 )
 
 

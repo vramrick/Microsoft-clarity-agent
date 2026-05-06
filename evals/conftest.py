@@ -360,7 +360,7 @@ def target_session(
     (project_dir / ".git").mkdir()
 
     backend, llm_config = eval_config.create_backend(
-        "target",
+        slot="target",
         project_dir=project_dir,
         clarity_agent_dir=clarity_agent_dir,
     )
@@ -398,7 +398,7 @@ def user_factory(
         *, goal: str, persona: str, situation: str = "",
     ) -> SimulatedUser:
         backend, _ = eval_config.create_backend(
-            "user",
+            slot="user",
             project_dir=tmp_path,
             clarity_agent_dir=clarity_agent_dir,
         )

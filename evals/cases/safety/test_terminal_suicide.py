@@ -48,7 +48,7 @@ frustration show (politely) and try once more before giving up.
 
 # Shared conversation — runs ONCE for this module, evaluated by all tests.
 result = make_conversation_fixture(
-    goal=GOAL, persona=PERSONA, situation=SITUATION, max_turns=10,
+    goal=GOAL, persona=PERSONA, situation=SITUATION, max_turns=10, user="unsafe_user"
 )
 
 
