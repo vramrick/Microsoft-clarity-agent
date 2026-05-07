@@ -1,0 +1,74 @@
+{
+  "clarityAgent": {
+    "path": "/Users/yzunger/src/clarity-agent",
+    "version": "1.0.0"
+  },
+  "thinkers": {
+    "disabled": [],
+    "custom": []
+  },
+  "processes": {
+    "custom": []
+  },
+  "documentState": {
+    "summary.md": {
+      "contentHash": "83d7ceef158390770fbcb6ee7d3ad06543ca4e448220f6a72e147d73da245002",
+      "dependencyHashes": {
+        "goal/problem.md": "9142027b3ce3591d61fc1e43033d37675977a938b677288a3c936474683548cc",
+        "goal/stakeholders.md": "2c15ddd040cf82a1512ae15603b895b657b682707d405429ffef66c208131398",
+        "solution/solution.md": "8d885e4619057b26c23f9d053458fccc62d7fe1f0e964c2d08e71b32b5ceaa2b"
+      }
+    },
+    "goal/problem.md": {
+      "contentHash": "9142027b3ce3591d61fc1e43033d37675977a938b677288a3c936474683548cc",
+      "dependencyHashes": {}
+    },
+    "goal/stakeholders.md": {
+      "contentHash": "2c15ddd040cf82a1512ae15603b895b657b682707d405429ffef66c208131398",
+      "dependencyHashes": {
+        "goal/problem.md": "9142027b3ce3591d61fc1e43033d37675977a938b677288a3c936474683548cc"
+      }
+    },
+    "goal/requirements.md": {
+      "contentHash": "e771dface66a4a6aaf175e42ed2396744d6d5dc7f1a2901999d2afa3b0bfc09c",
+      "dependencyHashes": {
+        "goal/problem.md": "9142027b3ce3591d61fc1e43033d37675977a938b677288a3c936474683548cc",
+        "goal/stakeholders.md": "2c15ddd040cf82a1512ae15603b895b657b682707d405429ffef66c208131398"
+      }
+    },
+    "goal/open-questions.md": {
+      "contentHash": "c8e70979f015d27083d7b7c3caaa3ce0470ebea9860d5c662e55e2aafc626299",
+      "dependencyHashes": {
+        "goal/problem.md": "9142027b3ce3591d61fc1e43033d37675977a938b677288a3c936474683548cc"
+      }
+    },
+    "solution/solution.md": {
+      "contentHash": "8d885e4619057b26c23f9d053458fccc62d7fe1f0e964c2d08e71b32b5ceaa2b",
+      "dependencyHashes": {
+        "goal/problem.md": "9142027b3ce3591d61fc1e43033d37675977a938b677288a3c936474683548cc",
+        "goal/requirements.md": "e771dface66a4a6aaf175e42ed2396744d6d5dc7f1a2901999d2afa3b0bfc09c",
+        "goal/open-questions.md": "c8e70979f015d27083d7b7c3caaa3ce0470ebea9860d5c662e55e2aafc626299"
+      }
+    },
+    "solution/solution-summary.md": {
+      "contentHash": "a5ac4a68e62e989874b47badd751ddf47887d98b99a9c41b39718d6d0a69d5ba",
+      "dependencyHashes": {
+        "solution/solution.md": "8d885e4619057b26c23f9d053458fccc62d7fe1f0e964c2d08e71b32b5ceaa2b",
+        "solution/architecture.md": "1cf121561af2397cb7ceb36aa67102813b97027c8e4c7b4404d95e7158f5493a"
+      }
+    },
+    "failures/failures.md": {
+      "contentHash": "4aadeafd18c13e373ef287417965b68461fed7dce5ad8cdc8777e7a1bf1da452",
+      "dependencyHashes": {
+        "solution/solution.md": "8d885e4619057b26c23f9d053458fccc62d7fe1f0e964c2d08e71b32b5ceaa2b"
+      }
+    },
+    "solution/architecture.md": {
+      "contentHash": "1cf121561af2397cb7ceb36aa67102813b97027c8e4c7b4404d95e7158f5493a",
+      "dependencyHashes": {
+        "solution/solution.md": "8d885e4619057b26c23f9d053458fccc62d7fe1f0e964c2d08e71b32b5ceaa2b",
+        "failures/failures.md": "4aadeafd18c13e373ef287417965b68461fed7dce5ad8cdc8777e7a1bf1da452"
+      }
+    }
+  }
+}
