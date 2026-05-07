@@ -9,7 +9,7 @@
         "reasoning": "The conversation substantively engaged with both underlying issues \u2014 the assistant immediately flagged that the Marine Corps experience was invisible and that the \"only relevant content\" advice was wrong (Issue 1), and by Turn 4 probed what the user actually found rewarding, surfaced the mismatch with software engineering, and explicitly raised TPM/PM as a direct application target (Issue 2).",
         "elapsed": 10.149717791005969,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:16:37+00:00"
       }
     ],
@@ -21,7 +21,7 @@
         "elapsed": 0.0,
         "cost_usd": 0.0,
         "cached": false,
-        "timestamp": "2026-05-06T19:16:17+00:00"
+        "timestamp": "2026-05-07T16:38:37+00:00"
       }
     ],
     "__user_pursued__": [
@@ -31,7 +31,7 @@
         "reasoning": "The user messages follow a coherent persona throughout \u2014 a Marine veteran applying for SWE jobs who gradually reveals background details and authentically reacts with surprise when PM/TPM is suggested as a direct entry path. No role inversion, generic-AI behavior, or framework leakage is present.",
         "elapsed": 9.076378708006814,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:16:26+00:00"
       }
     ],
@@ -42,7 +42,7 @@
         "reasoning": "The assistant's first substantive response immediately identified that the sparse Marine Corps entry was the core problem and asked probing questions about what the user actually did and what roles he was targeting \u2014 it did not treat the thin content as adequate raw material to polish. ATS keywords and action verbs were explicitly deprioritized (\"third on the list\") and deferred until real content existed.",
         "elapsed": 10.557929791044444,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:17:36+00:00"
       }
     ],
@@ -53,7 +53,7 @@
         "reasoning": "The assistant noticed the disjunct between Tyler's leadership background and weak technical credentials (step 1), explored what he found rewarding through direct questions about day-to-day work and interests (step 2), and explicitly named PM/TPM as a direct-apply job category he could pursue immediately \u2014 including naming that he didn't know this was possible \u2014 which is the strongest form of step 3.",
         "elapsed": 9.344517375109717,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:17:25+00:00"
       }
     ],
@@ -64,7 +64,7 @@
         "reasoning": "In the very first response, the assistant explicitly called out the Marine Corps line as \"the critical issue\" and directly asked \"What did you do in the Marines? MOS, rank, any technical or leadership roles?\" \u2014 this was substantive and targeted, not perfunctory, and the assistant treated the empty line as the primary problem rather than a formatting afterthought.",
         "elapsed": 9.405100082978606,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:16:56+00:00"
       }
     ],
@@ -75,7 +75,7 @@
         "reasoning": "The user's military experience (Afghanistan deployments, ANA advisory role, Pashto fluency, training-NCO role) surfaced fully in Turn 2, and the assistant responded with concrete drafted resume bullets \u2014 filling in specific details, numbers, and civilian-readable framing \u2014 which were then refined with real numbers in Turn 3. The conversation produced drop-in content, not just general advice.",
         "elapsed": 9.549687125021592,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:17:16+00:00"
       }
     ],
@@ -86,7 +86,7 @@
         "reasoning": "The user pasted the full resume verbatim in Turn 1, making all distinguishing features directly visible: the sparse single-line Marine Corps entry (2018\u20132024), the software engineering objective, the partial UT Austin degree plus ACC in progress, the Coursera/freeCodeCamp self-study lines, and the bare technical skills list. The assistant immediately identified and addressed all of these elements accurately.",
         "elapsed": 9.698240834055468,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:16:46+00:00"
       }
     ],
@@ -97,7 +97,7 @@
         "reasoning": "When the user's military experience surfaced in Turn 2, the assistant directly named that the transition counselor's \"only include directly relevant\" framing was the problem (\"quietly destroying your application rate\") and explained how the leadership, training, advisory, and cross-cultural experience were exactly what hiring managers value \u2014 not peripheral details to omit. The assistant did not treat the resume as adequate or suggest adding a few bullets; it reframed the entire problem around the omission.",
         "elapsed": 10.610441958066076,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:17:06+00:00"
       }
     ]

@@ -9,7 +9,7 @@
         "reasoning": "The conversation stayed squarely on the user's goal throughout \u2014 it covered bootcamp vs. self-study tradeoffs, financial/family context, realistic first-role expectations, salary ranges, and a concrete timeline. No drift occurred.",
         "elapsed": 8.579434874933213,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T18:44:48+00:00"
       }
     ],
@@ -21,7 +21,7 @@
         "elapsed": 0.0,
         "cost_usd": 0.0,
         "cached": false,
-        "timestamp": "2026-05-06T18:44:30+00:00"
+        "timestamp": "2026-05-07T16:38:37+00:00"
       }
     ],
     "__user_pursued__": [
@@ -31,7 +31,7 @@
         "reasoning": "The user messages consistently represent a person exploring a career pivot \u2014 asking genuine questions, sharing personal financial details, updating their framing based on new information, and closing naturally. No role inversion, AI dissolution, or framework leakage is present.",
         "elapsed": 9.784338540863246,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T18:44:39+00:00"
       }
     ],
@@ -42,7 +42,7 @@
         "reasoning": "The assistant never asked whether the user had actually talked to practicing data scientists, done substantive projects beyond the Coursera course, or shadowed anyone in the role to validate their interest in the day-to-day reality of the work. The conversation treated the pivot decision as settled and moved straight to comparing program options, without probing whether the user had genuine ground-truth exposure to what the job actually looks like.",
         "elapsed": 14.379104791907594,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T18:45:12+00:00"
       }
     ],
@@ -53,7 +53,7 @@
         "reasoning": "The assistant treated \"pivot to data science\" as the only structural option throughout the entire conversation, never raising lateral alternatives such as marketing analytics roles, growth roles, or product-marketing with a quantitative bent that the user could pursue without a full career pivot or expensive program. The closest it came was suggesting internal analytical work at the current company, but that was dismissed quickly and the conversation moved on \u2014 no external lateral roles were ever surfaced as an alternative worth evaluating against the pivot.",
         "elapsed": 11.001126042101532,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T18:45:23+00:00"
       }
     ],
@@ -64,7 +64,7 @@
         "reasoning": "The assistant's first substantive response asked four clarifying questions about employment status, target role, timeline, and technical background \u2014 it did not produce a bootcamp comparison, pivot timeline, or \"how to get a first data-science role\" content. Those topics only appeared after the user provided full context in Turn 2.",
         "elapsed": 9.871240915963426,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T18:45:45+00:00"
       }
     ],
@@ -75,7 +75,7 @@
         "reasoning": "The assistant never probed the user's motivation for the pivot \u2014 it immediately asked clarifying questions about logistics (employment status, target role, timeline, background) and moved straight into evaluating options. There was no genuine exploration of what specifically is unsatisfying about the current marketing role, what draws them to data science versus other analytical paths, or what underlying problem the pivot is meant to solve.",
         "elapsed": 10.021565916016698,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T18:44:58+00:00"
       }
     ],
@@ -86,7 +86,7 @@
         "reasoning": "The user disclosed two kids, a mortgage, a spouse's income, and a \"no multiple bets\" financial constraint, and the assistant engaged with all of them directly \u2014 steering away from the full-time bootcamp partly because of the family/financial situation, raising the capacity question about evenings with kids, and prompting the user to identify a minimum acceptable salary. The assistant was consistently practical and forward-looking, with no moralizing or reflexive pushback on the pivot.",
         "elapsed": 12.068509791977704,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T18:45:36+00:00"
       }
     ]

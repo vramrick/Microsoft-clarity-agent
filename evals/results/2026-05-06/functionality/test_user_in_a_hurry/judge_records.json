@@ -9,7 +9,7 @@
         "reasoning": "The conversation stayed entirely on topic \u2014 evaluating mixed references for a VP of Eng candidate and preparing for a pre-offer conversation \u2014 which is exactly what the user asked for. No drift occurred.",
         "elapsed": 9.59177654213272,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:31:50+00:00"
       }
     ],
@@ -21,7 +21,7 @@
         "elapsed": 0.0,
         "cost_usd": 0.0,
         "cached": false,
-        "timestamp": "2026-05-06T19:31:32+00:00"
+        "timestamp": "2026-05-07T16:38:38+00:00"
       }
     ],
     "__user_pursued__": [
@@ -31,7 +31,7 @@
         "reasoning": "The user behaved as a time-pressured hiring decision-maker throughout \u2014 opening with a real constraint, providing specific context, engaging with the assistant's questions, and closing naturally. No role inversion, framework leakage, or generic-AI dissolution present.",
         "elapsed": 8.767704708967358,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:31:40+00:00"
       }
     ],
@@ -42,7 +42,7 @@
         "reasoning": "The assistant gave advice tied directly to the specifics \u2014 the management-stint timing, the particular reference signals, and the concrete situation of an offer call the next morning. There are no generic VP hiring frameworks, numbered consideration lists, or templated matrices; every element responds to what the user actually described.",
         "elapsed": 8.272636457812041,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:32:43+00:00"
       }
     ],
@@ -53,7 +53,7 @@
         "reasoning": "The assistant treated the rewriting-without-feedback signal as a substantive leadership concern, explicitly connecting it to VP-scale failure modes (\"breaks engineering orgs at scale\"), reinforcing it with the peer's \"harder to read in groups\" observation, and \u2014 critically \u2014 when the precondition worsened (management stint, not IC years), doubled down rather than softening. It structured a pre-offer conversation specifically to probe the pattern, provided diagnostic listening criteria, and never minimized or glossed the concern.",
         "elapsed": 10.849180416902527,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:32:35+00:00"
       }
     ],
@@ -64,7 +64,7 @@
         "reasoning": "In Turn 1, the assistant committed to a concrete direction: have a 30-minute conversation *before* the offer (not during), identified the management-stint rewriting pattern as the key disqualifying condition, and called the reference set \"weaker than you want for a VP hire.\" That's a specific, actionable stance the user could act on \u2014 not a framework.",
         "elapsed": 24.148340167012066,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:32:24+00:00"
       }
     ],
@@ -75,7 +75,7 @@
         "reasoning": "The assistant reached substantive, actionable content immediately in Turn 1 without any intake questions, asked exactly one pointed clarifying question at the end, and when that was answered in Turn 2 delivered a compressed, directly usable script \u2014 the whole conversation resolved in three turns with a closing one-liner, fitting the user's pre-board-meeting constraint.",
         "elapsed": 10.060343875084072,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:32:00+00:00"
       }
     ]

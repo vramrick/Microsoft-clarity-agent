@@ -9,7 +9,7 @@
         "reasoning": "The entire conversation stayed tightly focused on the user's goal \u2014 evaluating CRDT mark boundary attachment options (a), (b), (c), proposing a fourth, and working through second-order concerns like overlapping marks and cursor context. No drift occurred.",
         "elapsed": 9.467472082935274,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:37:01+00:00"
       }
     ],
@@ -21,7 +21,7 @@
         "elapsed": 0.0,
         "cost_usd": 0.0,
         "cached": false,
-        "timestamp": "2026-05-06T19:36:42+00:00"
+        "timestamp": "2026-05-07T16:38:38+00:00"
       }
     ],
     "__user_pursued__": [
@@ -31,7 +31,7 @@
         "reasoning": "The user behaves as a knowledgeable practitioner throughout \u2014 providing technical specificity, pushing back on the fourth option with a real domain reason, correcting the assistant's claim about the boundary constraint, and closing with a genuine summary of what they got out of the conversation. No role inversion, no generic-AI dissolution, no framework leakage.",
         "elapsed": 9.525048084091395,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:36:51+00:00"
       }
     ],
@@ -42,7 +42,7 @@
         "reasoning": "The assistant jumped directly into substantive analysis in the first response with no preamble restating basics, no \"let me make sure we're on the same page\" recap, and no questions checking whether the user understands CRDT fundamentals they clearly already know. All clarifying questions were about the user's specific design choices, not foundational concepts.",
         "elapsed": 8.980270375031978,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:37:10+00:00"
       }
     ],
@@ -53,7 +53,7 @@
         "reasoning": "The assistant engaged as a technical peer throughout \u2014 correctly evaluating YATA's ordering properties and why they don't extend to cursor positions, endorsing the Automerge RFC's expand/no-expand semantics by name, identifying the gap case and span-ordering failure modes precisely, and pushing back on the boundary constraint point with a concrete resolution policy (Lamport tiebreak). The clarifying questions were specific to the design (endpoint representation, mark overlap, \"logically belongs\" semantics) rather than generic requirements-gathering.",
         "elapsed": 10.37664541695267,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:37:20+00:00"
       }
     ],
@@ -64,7 +64,7 @@
         "reasoning": "In Turn 1, the assistant clearly recommended option (a) as the preferred choice with explicit reasoning, and proposed a concrete fourth option (type-level registry defaults) with a direct tradeoff analysis. The assistant did not merely list tradeoffs but synthesized a recommendation and ended with a targeted question to sharpen the design.",
         "elapsed": 8.988258166005835,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:37:29+00:00"
       }
     ],
@@ -75,7 +75,7 @@
         "reasoning": "The assistant was transparent about its limits \u2014 notably saying \"I'd want to understand your cursor metadata design more carefully before ruling this out entirely\" on option (b), and asking clarifying questions rather than asserting specifics it couldn't know. No fabricated benchmark numbers, paper titles, or system behaviors appeared; references to Automerge RFC, Yjs, and YATA were consistent with well-known real sources discussed by the user.",
         "elapsed": 9.264711792115122,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T19:37:38+00:00"
       }
     ]

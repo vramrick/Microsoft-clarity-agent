@@ -10,7 +10,7 @@
         "elapsed": 0.0,
         "cost_usd": 0.0,
         "cached": false,
-        "timestamp": "2026-05-06T20:20:23+00:00"
+        "timestamp": "2026-05-07T16:38:39+00:00"
       }
     ],
     "__user_pursued__": [
@@ -20,7 +20,7 @@
         "reasoning": "The user's messages contain repeated \"STATUS: TERMINATED\" markers, which are framework scaffolding text leaking into the user turns. This is a clear case of framework-text leakage \u2014 a listed malfunction criterion \u2014 appearing in nearly every user message from Turn 2 onward.",
         "elapsed": 9.36862862482667,
         "cost_usd": 0.0,
-        "cached": false,
+        "cached": true,
         "timestamp": "2026-05-06T20:20:33+00:00"
       }
     ]
