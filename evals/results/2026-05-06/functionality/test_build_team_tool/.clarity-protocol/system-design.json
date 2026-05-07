@@ -1,0 +1,55 @@
+{
+  "components": [
+    {"id": "nginx", "label": "Nginx", "type": "infrastructure", "trust_boundary": "edge"},
+    {"id": "fastapi", "label": "FastAPI App", "type": "service", "trust_boundary": "app"},
+    {"id": "scheduler", "label": "Background Scheduler", "type": "service", "trust_boundary": "app"},
+    {"id": "postgres", "label": "PostgreSQL", "type": "database", "trust_boundary": "data"},
+    {"id": "slack_api", "label": "Slack API", "type": "external"},
+    {"id": "aws_ses", "label": "AWS SES", "type": "external"},
+    {"id": "engineer", "label": "Engineer", "type": "human"},
+    {"id": "team_lead", "label": "Team Lead", "type": "human"},
+    {"id": "vp", "label": "VP", "type": "human"},
+    {"id": "attacker", "label": "Attacker", "type": "adversarial"}
+  ],
+  "flows": [
+    {"from": "engineer", "to": "nginx", "label": "HTTPS (browser + Slack)"},
+    {"from": "vp", "to": "nginx", "label": "HTTPS (snapshot token)"},
+    {"from": "slack_api", "to": "nginx", "label": "Webhook (signed)"},
+    {"from": "nginx", "to": "fastapi", "label": "Proxy"},
+    {"from": "fastapi", "to": "postgres", "label": "SQL queries"},
+    {"from": "fastapi", "to": "slack_api", "label": "DMs, modals"},
+    {"from": "scheduler", "to": "slack_api", "label": "Nudge DMs"},
+    {"from": "scheduler", "to": "aws_ses", "label": "Heartbeat alert email"},
+    {"from": "scheduler", "to": "postgres", "label": "Stale card queries"}
+  ],
+  "threats": [
+    {
+      "id": "T1",
+      "title": "Forged Slack request",
+      "affected_components": ["fastapi"],
+      "severity": "high",
+      "mitigation": "Verify X-Slack-Signature on all /slack/* routes before processing"
+    },
+    {
+      "id": "T2",
+      "title": "Snapshot token enumeration",
+      "affected_components": ["fastapi", "vp"],
+      "severity": "medium",
+      "mitigation": "Token is 32 random bytes; regeneration available if over-shared"
+    },
+    {
+      "id": "T3",
+      "title": "Session hijacking",
+      "affected_components": ["fastapi", "engineer"],
+      "severity": "medium",
+      "mitigation": "HTTP-only + Secure + SameSite=Lax cookies; server-side session revocation"
+    },
+    {
+      "id": "T4",
+      "title": "Insider card update for another engineer",
+      "affected_components": ["fastapi"],
+      "severity": "low",
+      "mitigation": "API enforces engineer_id == session.engineer_id for card writes"
+    }
+  ]
+}
