@@ -27,5 +27,5 @@ documents are stale, read them with `read_protocol_document`, update with
 `write_protocol_document`.
 
 Record significant architectural choices with `record_decision`.
-Drop risks you notice with `record_failure`.
+Add risks you notice with `record_failure`.
 <!-- clarity-end -->
