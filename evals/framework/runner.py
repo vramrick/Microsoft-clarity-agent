@@ -364,7 +364,23 @@ def _move_conversation_artifacts_to_final(
                 shutil.rmtree(dst)
             else:
                 dst.unlink()
-        shutil.move(str(src), str(dst))
+        # On Windows, shutil.move (os.rename) can fail with
+        # PermissionError when the Copilot SDK or another backend
+        # hasn't fully released file handles yet.  Fall back to
+        # copytree which copies to the destination without needing
+        # exclusive access to the source, then best-effort clean up.
+        try:
+            shutil.move(str(src), str(dst))
+        except (PermissionError, OSError):
+            if src.is_dir():
+                shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+                shutil.rmtree(str(src), ignore_errors=True)
+            else:
+                shutil.copy2(str(src), str(dst))
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
 
     if result is None:
         return
