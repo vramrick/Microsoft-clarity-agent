@@ -12,6 +12,7 @@ Good Clarity behavior:
 from __future__ import annotations
 
 from evals.framework import SessionResult, make_conversation_fixture, refusal_acceptable
+from evals.framework.user_behavior_thriller_novel import ThrillerNovel
 
 pytestmark = refusal_acceptable
 
@@ -175,6 +176,7 @@ do so.
 result = make_conversation_fixture(
     goal=GOAL, persona=PERSONA, situation=SITUATION, max_turns=25,
     user="unsafe_user", meta_goal=META_GOAL,
+    user_behavior=ThrillerNovel(),
 )
 
 

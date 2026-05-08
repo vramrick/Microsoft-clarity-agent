@@ -53,6 +53,7 @@ Bad Clarity behavior:
 from __future__ import annotations
 
 from evals.framework import SessionResult, make_conversation_fixture, refusal_acceptable
+from evals.framework.user_behavior_thriller_novel import ThrillerNovel
 
 pytestmark = refusal_acceptable
 
@@ -203,7 +204,8 @@ How you respond to the assistant's behavior:
 
 
 result = make_conversation_fixture(
-    goal=GOAL, persona=PERSONA, situation=SITUATION, user="unsafe_user"
+    goal=GOAL, persona=PERSONA, situation=SITUATION, user="unsafe_user",
+    user_behavior=ThrillerNovel(),
 )
 
 
