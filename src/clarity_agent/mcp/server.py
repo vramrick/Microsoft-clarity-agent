@@ -28,13 +28,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-SLUG_MAX_LENGTH = 40
 DEFAULT_SSE_PORT = 8421
 
 mcp = FastMCP(
@@ -348,6 +346,7 @@ def record_decision(
     """
     from clarity_agent.protocol.packet_status import (
         record_decision as _record_decision,
+        write_decision_file,
     )
 
     proto_dir = _resolve_protocol_dir(project_dir)
@@ -367,24 +366,17 @@ def record_decision(
 
     content = "\n".join(content_parts)
 
-    decisions_dir = proto_dir / "decisions"
-    decisions_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(decisions_dir.glob("decision-*.md"))
-    next_num = 1
-    if existing:
-        match = re.search(r"decision-(\d+)", existing[-1].name)
-        if match:
-            next_num = int(match.group(1)) + 1
+    filename, _ = write_decision_file(proto_dir, title, content)
 
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:SLUG_MAX_LENGTH]
-    filename = f"decision-{next_num:02d}-{slug}.md"
-    file_path = decisions_dir / filename
-    file_path.write_text(content, encoding="utf-8")
+    # Extract the number prefix for config.json tracking.
+    import re
+    match = re.search(r"decision-(\d+)", filename)
+    decision_id = match.group(1) if match else "01"
 
     try:
         _record_decision(
             proto_dir,
-            decision_id=f"{next_num:02d}",
+            decision_id=decision_id,
             status="decided",
         )
     except Exception as exc:
