@@ -120,10 +120,6 @@ The MCP server exposes 8 tools, designed around three moments in a coding agent'
 | `record_failure` | Record a failure mode or risk |
 | `record_suggestion` | Record a suggestion to update a project document |
 
-### What's not a tool (and why)
-
-Process guides, thinker guides, and behavioral guidelines are available as MCP **resources** (`clarity://processes/{name}`, `clarity://thinkers/{name}`, `clarity://behaviors`). Protocol initialization, mailbox management, and packet generation are internal functions used by the desktop/web/CLI modes. `run_clarity` handles initialization and inlines process guide content when recommending a next step, so the coding agent doesn't need separate tools for those.
-
 ## How It Works
 
 The server uses two directories:
@@ -145,7 +141,7 @@ The AGENTS.md snippet (inserted by `clarity embed`) tells your coding agent when
 Before making choices that would be expensive to reverse, call check_decision.
 When starting work or returning after a break, call run_clarity.
 After completing significant implementation, call get_packet_status.
-Record significant choices with record_decision. Drop risks with record_failure.
+Record significant choices with record_decision. Add risks with record_failure.
 ```
 
 **New project:**
