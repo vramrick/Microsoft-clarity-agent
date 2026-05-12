@@ -1,21 +1,11 @@
 # Requirements
 
-## Must-haves
+1. **Land a good role, not just any role.** The environment problem at the current job shouldn't drive accepting something worse or lateral in ways that matter.
 
-- Backend engineering role with similar technical scope to current role
-- Meaningfully healthier team dynamic — defined as: clear prioritization process, manager who manages rather than just escalates, stable enough to do focused work
-- Don't give notice until a signed offer is in hand
-- Don't take a role out of financial pressure — 3–4 month runway gives room to be selective
+2. **Protect income continuity.** A gap is tolerable but should be short. No giving notice without an offer in hand.
 
-## Strong preferences
+3. **Maintain professional relationships.** Current employer gets proper notice and a clean handoff. Network contacts get treated as people, not leads.
 
-- Avoid spray-and-pray; prioritize warm outreach and referrals over volume
-- Keep pipeline at 3–5 active processes — manageable given current energy levels
-- Use structured interview questions to actively assess culture, not just react to vibes
-- Maintain positive relationship with current employer through exit
+4. **Run a parallel search.** Multiple threads active simultaneously — network activation, recruiter screens, direct applications. Sequential searching adds months.
 
-## Out of scope
-
-- Relitigating the decision to leave
-- Changing industry or technical domain significantly
-- Waiting for the current (healthtech) process to resolve before activating broader search
+5. **Don't drag it out.** The 2-3 month estimate assumes active effort. The clock needs to start now.
