@@ -37,6 +37,19 @@ def compute_fingerprint(transcript: str) -> str:
     return hashlib.sha256(transcript.encode("utf-8")).hexdigest()
 
 
+class FrozenJudgeCacheMissError(LookupError):
+    """Raised by a frozen :class:`JudgeCache` when no record exists.
+
+    A frozen cache (``--rebuild=none``) binds the eval to the verdicts
+    already on disk and forbids any LLM calls.  A missing record can't
+    be filled by re-judging in that mode — so the lookup raises rather
+    than returning ``None`` (which would otherwise signal the caller
+    to fall through to an LLM call).  The error message includes the
+    test name, the claim, and the cache path so the operator can tell
+    immediately which assertion was uncovered.
+    """
+
+
 @dataclass
 class JudgeCache:
     """Persistent cache of judge records for a single test module.
@@ -47,6 +60,13 @@ class JudgeCache:
     cache is treated as stale and cache hits are suppressed.  Fresh
     records written via :meth:`store` adopt the current fingerprint
     and overwrite any stale on-disk contents.
+
+    When constructed with ``frozen=True`` (``--rebuild=none`` mode),
+    the cache flips into accept-as-is semantics: fingerprint checks
+    are bypassed, every on-disk record is served, and missing records
+    raise :class:`FrozenJudgeCacheMissError` instead of returning
+    ``None``.  :meth:`store` and :meth:`prune_unseen` are no-ops in
+    frozen mode — the cache is read-only.
     """
 
     path: Path
@@ -54,6 +74,16 @@ class JudgeCache:
 
     fingerprint: str
     """Transcript fingerprint this cache is valid against."""
+
+    frozen: bool = False
+    """When True, the cache is treated as authoritative regardless of
+    fingerprint and never mutated.  Lookups bypass the fingerprint
+    check, misses raise :class:`FrozenJudgeCacheMissError`, and
+    :meth:`store` / :meth:`prune_unseen` are no-ops.  Used by
+    ``--rebuild=none`` to accept a shared eval-run's verdicts verbatim
+    without paying for any LLM calls.  The risk the operator opts
+    into: cached verdicts may have been judged against a transcript
+    that no longer matches what's on disk."""
 
     _records: dict[tuple[str, str], JudgeRecord] = field(
         default_factory=dict, repr=False,
@@ -104,9 +134,28 @@ class JudgeCache:
         Records the lookup against the seen-keys set (regardless of
         hit/miss) so :meth:`prune_unseen` can later drop entries that
         weren't touched this session.
+
+        Frozen mode (``self.frozen`` True) flips two behaviors: the
+        fingerprint check is bypassed (every on-disk record is served
+        even if the transcript has changed) and a miss raises
+        :class:`FrozenJudgeCacheMissError` rather than returning
+        ``None``.  This is what makes ``--rebuild=none`` strict:
+        callers that would normally fall through to an LLM call on a
+        miss instead see a clear error pointing at the specific
+        assertion that wasn't covered.
         """
         self._seen_keys.add((test_name, claim))
         self._seen_test_names.add(test_name)
+        if self.frozen:
+            rec = self._records.get((test_name, claim))
+            if rec is None:
+                raise FrozenJudgeCacheMissError(
+                    f"--rebuild=none: no cached judgment for "
+                    f"({test_name!r}, {claim!r}) in {self.path}.  "
+                    "The cached run did not cover this claim — rerun "
+                    "the eval without --rebuild=none to fill it in."
+                )
+            return rec
         if self._loaded_fingerprint != self.fingerprint:
             return None
         return self._records.get((test_name, claim))
@@ -117,7 +166,14 @@ class JudgeCache:
         The on-disk fingerprint advances to :attr:`fingerprint`, so
         subsequent lookups against the same fingerprint succeed even
         if the file was previously stale.
+
+        No-op in frozen mode — the cache is read-only.  Callers that
+        compute a synthetic record (e.g., substantivity) and try to
+        store it shouldn't crash; they just skip persisting.  The
+        previously-cached record (if any) remains the authority.
         """
+        if self.frozen:
+            return
         fresh = JudgeRecord(**{**asdict(record), "cached": False})
         self._records[(test_name, fresh.claim)] = fresh
         # The just-stored record has been "seen" by definition — keep
@@ -150,7 +206,12 @@ class JudgeCache:
         Called by the conversation fixture at module teardown after
         all per-test judge calls have completed.  Idempotent: if no
         stale entries are found, no write happens.
+
+        No-op in frozen mode — the cache is read-only and we don't
+        want to rewrite the file we were asked to accept verbatim.
         """
+        if self.frozen:
+            return
         keys_to_drop = [
             key for key in list(self._records)
             if key[0] in self._seen_test_names
@@ -183,6 +244,7 @@ class JudgeCache:
 
 
 __all__ = [
+    "FrozenJudgeCacheMissError",
     "JudgeCache",
     "compute_fingerprint",
 ]

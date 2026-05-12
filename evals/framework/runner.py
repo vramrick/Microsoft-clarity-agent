@@ -652,20 +652,41 @@ def make_conversation_fixture(
         rebuild_all = "all" in rebuild_targets
         rebuild_conversation = rebuild_all or "conversation" in rebuild_targets
         rebuild_judgment = rebuild_conversation or "judgment" in rebuild_targets
+        # "none" is the accept-as-is mode: read whatever's on disk,
+        # never call an LLM, never invalidate the cache.  Mutually
+        # exclusive with the rebuild-* directives — the rebuild_targets
+        # fixture enforces this at parse time, so reaching here with
+        # both set is a programming error in the fixture.
+        rebuild_none = "none" in rebuild_targets
 
         if rebuild_all and project_dir.exists():
             shutil.rmtree(project_dir)
 
         # Ensure the module dir + git marker exist.  Use exist_ok=True
         # so resume paths (which keep an existing dir) don't fail.
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / ".git").mkdir(exist_ok=True)
+        # Skipped in frozen mode — we won't create artifacts; the
+        # missing-transcript check below will fail with a clearer
+        # error than "git marker couldn't be created."
+        if not rebuild_none:
+            project_dir.mkdir(parents=True, exist_ok=True)
+            (project_dir / ".git").mkdir(exist_ok=True)
 
         # Try to resume the conversation from existing artifacts.
         # ``rebuild_conversation`` forces us to run fresh regardless of
-        # what's on disk.
+        # what's on disk.  ``rebuild_none`` requires the artifacts to
+        # exist — falling through to a fresh run is the wrong behavior
+        # for "accept what's on disk verbatim."
         loaded: SessionResult | None = None
-        if not rebuild_conversation:
+        if rebuild_none:
+            loaded = _load_session_result(project_dir)
+            if loaded is None:
+                raise RuntimeError(
+                    f"--rebuild=none was set but {project_dir} has no "
+                    "usable transcript on disk.  Either rerun the eval "
+                    "without --rebuild=none, or point --output-dir at "
+                    "the directory containing the shared run."
+                )
+        elif not rebuild_conversation:
             loaded = _load_session_result(project_dir)
 
         if loaded is not None:
@@ -747,13 +768,18 @@ def make_conversation_fixture(
             # Set up the judgment cache for this module.  The
             # fingerprint covers the exact transcript the judge will
             # see, so any edit — manual or by rerun — invalidates
-            # cached verdicts automatically.
+            # cached verdicts automatically.  In frozen mode
+            # (--rebuild=none) the cache accepts every on-disk record
+            # regardless of fingerprint and raises on miss instead of
+            # falling through to an LLM call; the judgment file is
+            # never rewritten.
             cache_path = project_dir / "judge_records.json"
             if rebuild_judgment:
                 cache_path.unlink(missing_ok=True)
             cache = JudgeCache(
                 path=cache_path,
                 fingerprint=compute_fingerprint(r.transcript),
+                frozen=rebuild_none,
             )
             judge.set_cache(cache)
             judge.set_role(_judge_role_override)

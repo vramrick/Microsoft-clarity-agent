@@ -39,7 +39,7 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-_REBUILD_CHOICES = ("conversation", "judgment", "all")
+_REBUILD_CHOICES = ("conversation", "judgment", "all", "none")
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +80,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "  judgment — rerun the judges against the existing "
             "transcript.  Wipes judge_records.json.\n"
             "  all — rm -rf the module directory and start fresh.\n"
+            "  none — accept all on-disk artifacts verbatim; do NOT "
+            "rerun conversations, do NOT rerun judges, and do NOT "
+            "validate the transcript fingerprint against cached "
+            "judgments.  No LLM calls are made.  Used to regenerate "
+            "summary.md from a shared eval-run produced by someone "
+            "else's backend.  Fails noisily if any required artifact "
+            "is missing or any assertion lacks a cached verdict.  "
+            "Mutually exclusive with the other rebuild values.\n"
             "Default (no flag): resume — reuse every cached artifact "
             "that's consistent with the current inputs."
         ),
@@ -161,6 +169,20 @@ def pytest_configure(config: pytest.Config) -> None:
     print("\n[eval] Resolved configuration:", file=sys.stderr)
     print(describe_resolved_config(eval_cfg), file=sys.stderr)
     print("", file=sys.stderr)
+
+    # Banner for the accept-as-is mode.  Operators forget what flag
+    # they passed three hours into a run; printing this once at
+    # session start anchors the rest of the output, and an empty
+    # summary later won't read as a bug.
+    rebuild_raw = config.getoption("--rebuild") or []
+    if "none" in rebuild_raw:
+        print(
+            "[eval] --rebuild=none: using cached artifacts only; "
+            "no LLM calls will be made.  Missing cached verdicts "
+            "will fail the affected test loudly.",
+            file=sys.stderr,
+        )
+        print("", file=sys.stderr)
 
     if print_and_exit:
         pytest.exit("--print-config: done", returncode=0)
@@ -277,9 +299,24 @@ def rebuild_targets(pytestconfig: pytest.Config) -> frozenset[str]:
     line.  Consumed by :func:`make_conversation_fixture` — the default
     (empty set) means "resume from disk where possible."  ``"all"``
     subsumes the others.
+
+    ``"none"`` is a separate mode (accept-all-cached, no LLM calls)
+    and is mutually exclusive with the other values; combining them
+    is rejected at fixture resolution time with a clear error,
+    because the intent is ambiguous (does the user want to rerun
+    something or not?).
     """
     raw = pytestconfig.getoption("--rebuild") or []
-    return frozenset(raw)
+    targets = frozenset(raw)
+    if "none" in targets and len(targets) > 1:
+        other = sorted(targets - {"none"})
+        raise pytest.UsageError(
+            f"--rebuild=none cannot be combined with other --rebuild "
+            f"values (got: {', '.join(other)}).  --rebuild=none means "
+            "'accept all on-disk artifacts verbatim, no LLM calls' "
+            "and is mutually exclusive with any rebuild directive."
+        )
+    return targets
 
 
 @pytest.fixture(scope="session")
