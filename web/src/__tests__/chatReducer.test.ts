@@ -253,6 +253,68 @@ describe("chatReducer", () => {
     });
   });
 
+  describe("status_event", () => {
+    it("stores the phase from a status event", () => {
+      const next = chatReducer(initialState, {
+        type: "status_event",
+        phase: "reasoning",
+      });
+      expect(next.statusPhase).toBe("reasoning");
+    });
+
+    it("overwrites previous phase on transition", () => {
+      let state = chatReducer(initialState, {
+        type: "status_event",
+        phase: "thinking",
+      });
+      state = chatReducer(state, {
+        type: "status_event",
+        phase: "tool:read_file",
+      });
+      expect(state.statusPhase).toBe("tool:read_file");
+    });
+
+    it("is cleared by receive_response", () => {
+      let state = chatReducer(initialState, {
+        type: "send_message",
+        content: "Q",
+      });
+      state = chatReducer(state, {
+        type: "status_event",
+        phase: "reasoning",
+      });
+      expect(state.statusPhase).toBe("reasoning");
+      state = chatReducer(state, {
+        type: "receive_response",
+        content: "A",
+      });
+      expect(state.statusPhase).toBeNull();
+    });
+
+    it("is cleared by error_event", () => {
+      let state = chatReducer(initialState, {
+        type: "status_event",
+        phase: "tool:write_file",
+      });
+      expect(state.statusPhase).toBe("tool:write_file");
+      state = chatReducer(state, {
+        type: "error_event",
+        error: { message: "Something broke" },
+      });
+      expect(state.statusPhase).toBeNull();
+    });
+
+    it("is cleared by clear", () => {
+      let state = chatReducer(initialState, {
+        type: "status_event",
+        phase: "sub-agent working",
+      });
+      expect(state.statusPhase).toBe("sub-agent working");
+      state = chatReducer(state, { type: "clear" });
+      expect(state.statusPhase).toBeNull();
+    });
+  });
+
   describe("outgoing message queue", () => {
     it("enqueue_message appends to the queue", () => {
       let state = chatReducer(initialState, {
