@@ -26,7 +26,11 @@ from evals.framework.judge import (
     Judge,
     SmokeCheckFailedError,
 )
-from evals.framework.resume import JudgeCache, compute_fingerprint
+from evals.framework.resume import (
+    FrozenJudgeCacheMissError,
+    JudgeCache,
+    compute_fingerprint,
+)
 from evals.framework.runner import (
     make_conversation_fixture,
     protocol_content,
@@ -98,6 +102,7 @@ refusal_acceptable = pytest.mark.refusal_acceptable
 __all__ = [
     "AgentRefusedError",
     "EvalConfig",
+    "FrozenJudgeCacheMissError",
     "Judge",
     "JudgeCache",
     "RoleConfig",

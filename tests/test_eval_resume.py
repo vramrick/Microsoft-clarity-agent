@@ -21,7 +21,11 @@ from unittest.mock import patch
 import pytest
 from evals.framework.config import EvalConfig, RoleConfig
 from evals.framework.judge import Judge, JudgeRecord
-from evals.framework.resume import JudgeCache, compute_fingerprint
+from evals.framework.resume import (
+    FrozenJudgeCacheMissError,
+    JudgeCache,
+    compute_fingerprint,
+)
 
 # ---------------------------------------------------------------------------
 # compute_fingerprint
@@ -239,6 +243,148 @@ def test_prune_unseen_records_lookup_misses_too(
     assert claims_on_disk == ["NEW"], (
         f"expected OLD pruned and NEW retained, got {claims_on_disk}"
     )
+
+
+# ---------------------------------------------------------------------------
+# JudgeCache frozen mode — --rebuild=none semantics
+#
+# A frozen cache bypasses the fingerprint check entirely and refuses to
+# fall through to an LLM call on a miss.  Used to accept a shared
+# eval-run's verdicts verbatim and regenerate summary.md without
+# paying for any LLM time.  Two behaviors flip:
+#
+#   - lookup() serves cached records regardless of fingerprint match
+#   - lookup() raises FrozenJudgeCacheMissError on miss instead of
+#     returning None (which would normally signal the caller to call
+#     the LLM)
+#
+# store() and prune_unseen() become no-ops so the on-disk file we
+# were asked to accept verbatim is never rewritten.
+# ---------------------------------------------------------------------------
+
+
+def test_frozen_cache_serves_hits_despite_fingerprint_mismatch(
+    tmp_path: Path,
+) -> None:
+    """A frozen cache returns cached records even when the fingerprint differs.
+
+    This is the load-bearing behavior for --rebuild=none: someone
+    else ran the eval against transcript X, we're loading the same
+    file against transcript Y, and the user has told us they accept
+    those verdicts anyway.  The frozen cache honors that.
+    """
+    path = tmp_path / "judge_records.json"
+    seed = JudgeCache(path=path, fingerprint="fp-original")
+    seed.store("test_x", _make_record(claim="c", verdict="YES"))
+
+    frozen = JudgeCache(
+        path=path, fingerprint="fp-different", frozen=True,
+    )
+    rec = frozen.lookup("test_x", "c")
+    assert rec is not None
+    assert rec.verdict == "YES"
+
+
+def test_frozen_cache_raises_on_miss_with_diagnostic_info(
+    tmp_path: Path,
+) -> None:
+    """A miss in frozen mode raises with test_name, claim, and path.
+
+    The caller in production is :meth:`Judge.check`, which on a None
+    lookup would normally call the LLM — exactly what frozen mode
+    forbids.  Raising surfaces the missing-coverage to the operator
+    with enough context to know which assertion needs filling in.
+    """
+    path = tmp_path / "judge_records.json"
+    seed = JudgeCache(path=path, fingerprint="fp")
+    seed.store("test_x", _make_record(claim="known"))
+
+    frozen = JudgeCache(path=path, fingerprint="fp", frozen=True)
+    with pytest.raises(FrozenJudgeCacheMissError) as exc_info:
+        frozen.lookup("test_y", "uncovered claim")
+    msg = str(exc_info.value)
+    assert "test_y" in msg
+    assert "uncovered claim" in msg
+    assert str(path) in msg
+    assert "--rebuild=none" in msg
+
+
+def test_frozen_cache_raises_when_file_is_completely_missing(
+    tmp_path: Path,
+) -> None:
+    """No on-disk cache + frozen mode + lookup → raises.
+
+    Edge case of the diagnostic-info test: ensures the raise fires
+    even when the file never existed, not just when the file exists
+    but lacks a specific record.
+    """
+    path = tmp_path / "judge_records.json"  # does not exist
+    frozen = JudgeCache(path=path, fingerprint="fp", frozen=True)
+    with pytest.raises(FrozenJudgeCacheMissError):
+        frozen.lookup("any_test", "any claim")
+
+
+def test_frozen_cache_store_is_noop_and_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    """store() on a frozen cache silently does nothing.
+
+    Callers that synthesize records (substantivity, etc.) routinely
+    call store() without checking the frozen flag.  store() returns
+    quietly so those code paths don't need to know about the mode.
+    """
+    path = tmp_path / "judge_records.json"
+    seed = JudgeCache(path=path, fingerprint="fp")
+    seed.store("test_x", _make_record(claim="original"))
+    original_bytes = path.read_bytes()
+
+    frozen = JudgeCache(path=path, fingerprint="fp", frozen=True)
+    frozen.store("test_y", _make_record(claim="would-be new"))
+
+    # On-disk file unchanged.
+    assert path.read_bytes() == original_bytes
+    # Frozen cache also doesn't expose the would-be-new record.
+    with pytest.raises(FrozenJudgeCacheMissError):
+        frozen.lookup("test_y", "would-be new")
+
+
+def test_frozen_cache_prune_unseen_is_noop(tmp_path: Path) -> None:
+    """prune_unseen() on a frozen cache leaves the file alone.
+
+    Prune is normally called at module teardown to drop records that
+    weren't touched this session — but in frozen mode the operator
+    asked for the on-disk artifacts verbatim, so we don't rewrite
+    them, even to remove stale entries.
+    """
+    path = tmp_path / "judge_records.json"
+    seed = JudgeCache(path=path, fingerprint="fp")
+    seed.store("__user_pursued__", _make_record(claim="OLD"))
+    seed.store("__user_pursued__", _make_record(claim="NEW"))
+    original_bytes = path.read_bytes()
+
+    frozen = JudgeCache(path=path, fingerprint="fp", frozen=True)
+    # Touch only NEW — in a non-frozen cache this would prune OLD.
+    frozen.lookup("__user_pursued__", "NEW")
+    frozen.prune_unseen()
+
+    assert path.read_bytes() == original_bytes
+
+
+def test_frozen_default_is_false_so_existing_callers_unaffected(
+    tmp_path: Path,
+) -> None:
+    """Constructing JudgeCache without ``frozen=`` preserves prior behavior.
+
+    Existing callers (the resume path in the runner) construct
+    JudgeCache without specifying the frozen flag.  This regression
+    guard confirms the default value preserves the original
+    fingerprint-checking, returns-None-on-miss semantics.
+    """
+    path = tmp_path / "judge_records.json"
+    cache = JudgeCache(path=path, fingerprint="fp")
+    assert cache.frozen is False
+    # Miss returns None, doesn't raise.
+    assert cache.lookup("test_x", "claim") is None
 
 
 # ---------------------------------------------------------------------------
@@ -789,10 +935,12 @@ def test_partial_prior_run_does_not_resume(tmp_path: Path) -> None:
 
 def test_public_api_exports() -> None:
     """Resume pieces are reachable from the framework package root."""
+    from evals.framework import FrozenJudgeCacheMissError as ExportedFrozenErr
     from evals.framework import JudgeCache as ExportedCache
     from evals.framework import compute_fingerprint as exported_fp
 
     assert ExportedCache is JudgeCache
     assert exported_fp is compute_fingerprint
+    assert ExportedFrozenErr is FrozenJudgeCacheMissError
     # Silence "imported but unused" for static analyzers.
-    _ = (ExportedCache, exported_fp, pytest)
+    _ = (ExportedCache, exported_fp, ExportedFrozenErr, pytest)
