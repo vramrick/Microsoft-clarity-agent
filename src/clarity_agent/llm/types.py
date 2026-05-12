@@ -33,6 +33,12 @@ CostCallback = Callable[[float], None]
 # Callback type for non-fatal warning events: (message,) -> None
 WarnCallback = Callable[[str], None]
 
+# Callback type for ephemeral status updates: (phase,) -> None
+# Phases are coalesced state transitions (e.g. "reasoning", "tool:read_file")
+# not a stream of every SDK event.  The frontend should display the
+# latest status transiently, overwriting the previous one.
+StatusCallback = Callable[[str], None]
+
 # Callback type for tool-use loop handlers: (tool_call) -> result_string
 ToolHandler = Callable[["ToolUseBlock"], str]
 

@@ -237,6 +237,7 @@ describe("chatReducer", () => {
         activeTier: "default",
         autoModel: false,
         error: null,
+        statusPhase: null,
       };
       const next = chatReducer(populated, { type: "clear" });
       expect(next.messages).toEqual([]);

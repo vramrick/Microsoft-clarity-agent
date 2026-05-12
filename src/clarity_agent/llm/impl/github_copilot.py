@@ -352,6 +352,17 @@ class CopilotChatBackend(ChatBackend):
         # close over names rather than values — mutating [0] is the
         # simplest way to share a single monotonic counter.
         activity_timestamp: list[float] = [time.monotonic()]
+        # Coalesced status: only emit a status callback when the
+        # high-level phase changes (e.g. "reasoning" → "tool:read_file"),
+        # not on every SDK event.
+        current_phase: list[str] = [""]
+
+        def _emit_phase(phase: str) -> None:
+            """Emit a status callback if the phase changed."""
+            if phase != current_phase[0]:
+                current_phase[0] = phase
+                if self.on_status:
+                    self.on_status(phase)
 
         def on_event(event: SessionEvent) -> None:
             # Any event counts as liveness, even ones we don't act on.
@@ -380,8 +391,30 @@ class CopilotChatBackend(ChatBackend):
                 tool_name = getattr(event.data, "tool_name", None) or ""
                 if self.on_tool_use:
                     self.on_tool_use(tool_name, "executing")
+                _emit_phase(f"tool:{tool_name}" if tool_name else "executing tool")
             elif event.type == SessionEventType.SESSION_IDLE:
                 done.set()
+
+            # Coalesced status for events that don't generate other
+            # frontend messages — gives visibility into long-running
+            # turns without flooding the UI.
+            elif event.type == SessionEventType.ASSISTANT_TURN_START:
+                _emit_phase("thinking")
+            elif event.type in (
+                SessionEventType.ASSISTANT_REASONING,
+                SessionEventType.ASSISTANT_REASONING_DELTA,
+            ):
+                _emit_phase("reasoning")
+            elif event.type == SessionEventType.TOOL_EXECUTION_COMPLETE:
+                _emit_phase("thinking")
+            elif event.type == SessionEventType.TOOL_EXECUTION_PROGRESS:
+                pass  # stay in current tool phase, just refreshes activity_timestamp
+            elif event.type == SessionEventType.SUBAGENT_STARTED:
+                _emit_phase("sub-agent working")
+            elif event.type == SessionEventType.SUBAGENT_COMPLETED:
+                _emit_phase("thinking")
+            elif event.type == SessionEventType.SESSION_COMPACTION_START:
+                _emit_phase("compacting context")
 
         unsubscribe = self._session.on(on_event)
         try:

@@ -42,6 +42,10 @@ export interface ChatState {
   activeTier: string | null;
   autoModel: boolean;
   error: ErrorInfo | null;
+  /** Ephemeral status phase from the backend (e.g. "reasoning",
+   *  "tool:read_file").  Displayed transiently, not in chat history.
+   *  Cleared on response/error. */
+  statusPhase: string | null;
 }
 
 export type ChatAction =
@@ -58,6 +62,7 @@ export type ChatAction =
   | { type: "model_changed"; tier: string; model: string; auto: boolean }
   | { type: "error_event"; error: ErrorInfo }
   | { type: "warning_event"; message: string }
+  | { type: "status_event"; phase: string }
   | { type: "dismiss_error" }
   | { type: "clear" };
 
@@ -168,6 +173,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         streamingText: "",
         sessionCost: state.sessionCost + state.turnCost,
         streaming: false,
+        statusPhase: null,
       };
     }
 
@@ -211,6 +217,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...state,
         error: action.error,
         streaming: false,
+        statusPhase: null,
       };
 
     case "warning_event":
@@ -218,6 +225,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return {
         ...state,
         error: { message: action.message, category: "warning", retryable: false },
+      };
+
+    case "status_event":
+      return {
+        ...state,
+        statusPhase: action.phase,
       };
 
     case "dismiss_error":
@@ -242,6 +255,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         activeTier: state.activeTier,
         autoModel: state.autoModel,
         error: null,
+        statusPhase: null,
       };
 
     default:
@@ -264,6 +278,7 @@ export const initialState: ChatState = {
   activeTier: null,
   autoModel: true,
   error: null,
+  statusPhase: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -287,6 +302,8 @@ export interface UseChatReturn {
   activeTier: string | null;
   autoModel: boolean;
   error: ErrorInfo | null;
+  /** Ephemeral backend status phase (e.g. "reasoning", "tool:read_file"). */
+  statusPhase: string | null;
   sendMessage: (text: string) => void;
   startProcess: (name: string) => void;
   stopGeneration: () => void;
@@ -344,6 +361,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         break;
       case "warning":
         dispatch({ type: "warning_event", message: msg.message });
+        break;
+      case "status":
+        dispatch({ type: "status_event", phase: msg.phase });
         break;
       case "error":
         dispatch({
@@ -437,6 +457,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     activeTier: state.activeTier,
     autoModel: state.autoModel,
     error: state.error,
+    statusPhase: state.statusPhase,
     sendMessage,
     startProcess,
     stopGeneration,
