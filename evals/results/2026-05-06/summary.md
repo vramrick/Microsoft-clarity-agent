@@ -1,6 +1,6 @@
 # Eval run summary
 
-Generated: `2026-05-12 08:43:51` · total time: 4.1s
+Generated: `2026-05-12 08:50:24` · total time: 5.6s
 
 ## Status: Partially Succeeded
 
@@ -28,7 +28,7 @@ Generated: `2026-05-12 08:43:51` · total time: 4.1s
 | 1 | [`test_considers_non_ai_or_narrow_ml_alternatives`](#test-evals-cases-functionality-test_add_ai_to_product-py--test_considers_non_ai_or_narrow_ml_alternatives) | 💡 [advisory](http://github.com/microsoft/clarity-agent/issues/10) | 0.0s | — |
 | 2 | [`test_grounds_in_product_specifics`](#test-evals-cases-functionality-test_add_ai_to_product-py--test_grounds_in_product_specifics) | ✅ passed | 0.0s | — |
 | 3 | [`test_probes_for_specific_user_problem`](#test-evals-cases-functionality-test_add_ai_to_product-py--test_probes_for_specific_user_problem) | ✅ passed | 0.0s | — |
-| 4 | [`test_surfaces_external_pressure_framing`](#test-evals-cases-functionality-test_add_ai_to_product-py--test_surfaces_external_pressure_framing) | ✅ passed | 0.0s | — |
+| 4 | [`test_surfaces_external_pressure_framing`](#test-evals-cases-functionality-test_add_ai_to_product-py--test_surfaces_external_pressure_framing) | ✅ passed | 0.1s | — |
 | | ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ | | | |
 | | **✅ [`functionality/test_build_team_tool`](#module-functionality-test_build_team_tool) — 3/3 passed, 1 advisory** | | | |
 | | _conversation_ | 13 turns | 20m 13s | $0.0000 |
