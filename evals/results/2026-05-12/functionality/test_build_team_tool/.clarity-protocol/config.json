@@ -1,0 +1,59 @@
+{
+  "clarityAgent": {
+    "path": "/Users/yzunger/src/clarity-agent",
+    "version": "1.0.0"
+  },
+  "thinkers": {
+    "disabled": [],
+    "custom": []
+  },
+  "processes": {
+    "custom": []
+  },
+  "documentState": {
+    "goal/problem.md": {
+      "contentHash": "ce09506115b454999ebe4e74cb3e6f0afb18bdd906c5ede5ea4fcaf8e8e2f888",
+      "dependencyHashes": {}
+    },
+    "goal/stakeholders.md": {
+      "contentHash": "0fe1bd6ef07e625e02f6ab0d376493afbbae4f430f73158b3e41124668f941a6",
+      "dependencyHashes": {
+        "goal/problem.md": "ce09506115b454999ebe4e74cb3e6f0afb18bdd906c5ede5ea4fcaf8e8e2f888"
+      }
+    },
+    "goal/requirements.md": {
+      "contentHash": "cdec4508cfa4de26cade85e519c7dc38267eb1d10784a0faf36b0202e18e7165",
+      "dependencyHashes": {
+        "goal/problem.md": "ce09506115b454999ebe4e74cb3e6f0afb18bdd906c5ede5ea4fcaf8e8e2f888",
+        "goal/stakeholders.md": "0fe1bd6ef07e625e02f6ab0d376493afbbae4f430f73158b3e41124668f941a6"
+      }
+    },
+    "goal/open-questions.md": {
+      "contentHash": "c8e70979f015d27083d7b7c3caaa3ce0470ebea9860d5c662e55e2aafc626299",
+      "dependencyHashes": {
+        "goal/problem.md": "ce09506115b454999ebe4e74cb3e6f0afb18bdd906c5ede5ea4fcaf8e8e2f888"
+      }
+    },
+    "solution/solution.md": {
+      "contentHash": "da609d0806af287f480624d074cd362a96314c13bc8403e2b58fba126f56c263",
+      "dependencyHashes": {
+        "goal/problem.md": "ce09506115b454999ebe4e74cb3e6f0afb18bdd906c5ede5ea4fcaf8e8e2f888",
+        "goal/requirements.md": "cdec4508cfa4de26cade85e519c7dc38267eb1d10784a0faf36b0202e18e7165",
+        "goal/open-questions.md": "c8e70979f015d27083d7b7c3caaa3ce0470ebea9860d5c662e55e2aafc626299"
+      }
+    },
+    "solution/architecture.md": {
+      "contentHash": "766a3844a62e6ef3f350e1aa594e5ac53a93970a3cd0a9c6f9c6c5141ea35bfd",
+      "dependencyHashes": {
+        "solution/solution.md": "da609d0806af287f480624d074cd362a96314c13bc8403e2b58fba126f56c263"
+      }
+    },
+    "solution/solution-summary.md": {
+      "contentHash": "21ce1ae2ee7de0dfa9b422017dc154c47a80dce18c3130107d45f7b504c53373",
+      "dependencyHashes": {
+        "solution/solution.md": "da609d0806af287f480624d074cd362a96314c13bc8403e2b58fba126f56c263",
+        "solution/architecture.md": "766a3844a62e6ef3f350e1aa594e5ac53a93970a3cd0a9c6f9c6c5141ea35bfd"
+      }
+    }
+  }
+}

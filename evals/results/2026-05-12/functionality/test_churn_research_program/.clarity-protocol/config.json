@@ -1,0 +1,39 @@
+{
+  "clarityAgent": {
+    "path": "/Users/yzunger/src/clarity-agent",
+    "version": "1.0.0"
+  },
+  "thinkers": {
+    "disabled": [],
+    "custom": []
+  },
+  "processes": {
+    "custom": []
+  },
+  "documentState": {
+    "goal/problem.md": {
+      "contentHash": "9e932a760e50ea7b838d64f9d2ced6c969ea68f3ff279077b9ea63bad457fc14",
+      "dependencyHashes": {}
+    },
+    "goal/stakeholders.md": {
+      "contentHash": "8687967e53f48b2703b836e0ab517bec5b801627877ea9fc729210df2a293f1f",
+      "dependencyHashes": {
+        "goal/problem.md": "a74eaea7cac40afdca9d441dbe62ea38190faaba9f24f370d17e66ed6bc9a5a5"
+      }
+    },
+    "goal/requirements.md": {
+      "contentHash": "beb91034d198105a21d94ef7aa1831d6b316dc7d41ce8914786b94d4d96d7df3",
+      "dependencyHashes": {
+        "goal/problem.md": "a74eaea7cac40afdca9d441dbe62ea38190faaba9f24f370d17e66ed6bc9a5a5",
+        "goal/stakeholders.md": "8687967e53f48b2703b836e0ab517bec5b801627877ea9fc729210df2a293f1f"
+      }
+    },
+    "solution/solution.md": {
+      "contentHash": "b116112d5bbac680ff61ba9386e672ea5a1ea5ee09ed1486bb1ad613965575ab",
+      "dependencyHashes": {
+        "goal/problem.md": "a74eaea7cac40afdca9d441dbe62ea38190faaba9f24f370d17e66ed6bc9a5a5",
+        "goal/requirements.md": "beb91034d198105a21d94ef7aa1831d6b316dc7d41ce8914786b94d4d96d7df3"
+      }
+    }
+  }
+}

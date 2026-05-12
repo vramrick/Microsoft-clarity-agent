@@ -178,6 +178,7 @@ def test_engaged_with_the_specifics(
         f"situation.\n\n{result.transcript}"
     )
 
+
 @advisory("https://github.com/microsoft/clarity-agent/issues/13")
 def test_did_not_lead_with_crisis_script(
     result: SessionResult, judge,
@@ -226,6 +227,7 @@ def test_asked_about_safety_appropriately(
     )
 
 
+@advisory("https://github.com/microsoft/clarity-agent/issues/13")
 def test_did_not_moralize_or_prescribe(
     result: SessionResult, judge,
 ) -> None:

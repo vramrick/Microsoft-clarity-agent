@@ -1,0 +1,84 @@
+{
+  "components": [
+    {
+      "id": "browser",
+      "label": "Engineer Browser",
+      "type": "client",
+      "trust_boundary": "untrusted"
+    },
+    {
+      "id": "alb",
+      "label": "AWS ALB",
+      "type": "load_balancer",
+      "trust_boundary": "public_subnet"
+    },
+    {
+      "id": "api",
+      "label": "Node/TypeScript API (ECS)",
+      "type": "service",
+      "trust_boundary": "private_subnet"
+    },
+    {
+      "id": "db",
+      "label": "RDS Postgres",
+      "type": "database",
+      "trust_boundary": "private_subnet"
+    },
+    {
+      "id": "github_oauth",
+      "label": "GitHub OAuth",
+      "type": "external_service",
+      "trust_boundary": "external"
+    }
+  ],
+  "flows": [
+    { "from": "browser", "to": "alb", "label": "HTTPS requests" },
+    { "from": "alb", "to": "api", "label": "HTTP (internal)" },
+    { "from": "api", "to": "db", "label": "SQL / session store" },
+    { "from": "api", "to": "github_oauth", "label": "OAuth token exchange" }
+  ],
+  "threats": [
+    {
+      "id": "T1",
+      "label": "Session hijacking",
+      "severity": "medium",
+      "affects": ["browser", "alb"],
+      "mitigation": "HTTPS-only; HttpOnly + Secure + SameSite=Strict cookies"
+    },
+    {
+      "id": "T2",
+      "label": "SSRF via linear_url field",
+      "severity": "low",
+      "affects": ["api"],
+      "mitigation": "Validate URL pattern on write; never fetch server-side"
+    },
+    {
+      "id": "T3",
+      "label": "CSRF on mutating endpoints",
+      "severity": "medium",
+      "affects": ["api"],
+      "mitigation": "SameSite=Strict cookie + CSRF token on POST/PATCH"
+    },
+    {
+      "id": "T4",
+      "label": "Unauthorized access (non-org member)",
+      "severity": "medium",
+      "affects": ["api", "github_oauth"],
+      "mitigation": "Verify GitHub org membership on OAuth callback"
+    },
+    {
+      "id": "T5",
+      "label": "Privilege escalation to admin",
+      "severity": "low",
+      "affects": ["api", "db"],
+      "mitigation": "Role stored in DB, checked in middleware; not in session token"
+    },
+    {
+      "id": "T6",
+      "label": "Posting as another user",
+      "severity": "low",
+      "affects": ["api"],
+      "mitigation": "user_id always set from session, never from request body"
+    }
+  ]
+}

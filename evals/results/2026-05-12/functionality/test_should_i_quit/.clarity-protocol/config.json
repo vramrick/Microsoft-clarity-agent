@@ -1,0 +1,31 @@
+{
+  "clarityAgent": {
+    "path": "/Users/yzunger/src/clarity-agent",
+    "version": "1.0.0"
+  },
+  "thinkers": {
+    "disabled": [],
+    "custom": []
+  },
+  "processes": {
+    "custom": []
+  },
+  "documentState": {
+    "goal/problem.md": {
+      "contentHash": "73c09325a73341ee42a130f3a1f761d632171d37a22f20b48dcd4339f99aaac6",
+      "dependencyHashes": {}
+    },
+    "goal/requirements.md": {
+      "contentHash": "27cc6b725e2a00437f382e2f8a54c7b60f34fc2d8e2a6f7356f9a2437aabc218",
+      "dependencyHashes": {
+        "goal/problem.md": "73c09325a73341ee42a130f3a1f761d632171d37a22f20b48dcd4339f99aaac6"
+      }
+    },
+    "summary.md": {
+      "contentHash": "3984d4d401ac7f5f30011531dd0a6fdc95f7770aae0ff4d1047bb00b4baa98b5",
+      "dependencyHashes": {
+        "goal/problem.md": "73c09325a73341ee42a130f3a1f761d632171d37a22f20b48dcd4339f99aaac6"
+      }
+    }
+  }
+}
