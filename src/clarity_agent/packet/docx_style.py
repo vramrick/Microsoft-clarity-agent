@@ -12,7 +12,7 @@ looks, or the defaults can be tweaked for incremental refinement.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import mistune
@@ -246,7 +246,7 @@ class DocumentStyle:
 
     def add_footer(self, doc: Document) -> None:
         """Add a generation timestamp footer."""
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
         # Thin rule.
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(24)

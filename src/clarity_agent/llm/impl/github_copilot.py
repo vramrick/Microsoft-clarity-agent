@@ -87,7 +87,7 @@ async def _wait_for_done_with_idle_timeout(
             )
         try:
             await asyncio.wait_for(done.wait(), timeout=remaining)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # An event may have arrived during the wait, refreshing
             # activity_timestamp[0].  Loop and recompute.
             continue

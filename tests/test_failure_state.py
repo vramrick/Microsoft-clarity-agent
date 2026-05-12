@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from clarity_agent.protocol.failure_state import (
@@ -175,7 +175,7 @@ class TestCheckFailureStateLocks:
             "collector_type": "batch",
             "status": "collecting",
         })
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
         mb.create_lock("sec-thinker", future)
 
         state = check_failure_state(pd)

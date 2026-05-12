@@ -17,7 +17,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -449,7 +449,7 @@ def _make_substantivity_record(
         elapsed=0.0,
         cost_usd=0.0,
         cached=False,
-        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
     )
 
 
@@ -676,7 +676,7 @@ class Judge:
             elapsed=elapsed,
             cost_usd=cost_usd,
             cached=False,
-            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
         )
 
         if self._cache is not None and test_name is not None:
@@ -749,7 +749,7 @@ class Judge:
             elapsed=elapsed,
             cost_usd=cost_usd,
             cached=False,
-            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
         )
         if self._cache is not None:
             self._cache.store(_USER_PURSUED_CACHE_KEY, record)
@@ -822,7 +822,7 @@ class Judge:
             elapsed=elapsed,
             cost_usd=cost_usd,
             cached=False,
-            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
         )
         if self._cache is not None:
             self._cache.store(_GOAL_PURSUED_CACHE_KEY, record)
@@ -899,7 +899,7 @@ class Judge:
             elapsed=elapsed,
             cost_usd=cost_usd,
             cached=False,
-            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
         )
         if self._cache is not None:
             self._cache.store(_REFUSAL_CACHE_KEY, record)
@@ -983,7 +983,7 @@ class Judge:
             elapsed=elapsed,
             cost_usd=cost_usd,
             cached=False,
-            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
         )
         if self._cache is not None:
             self._cache.store(_PERSONA_TEST_NAME, record)
