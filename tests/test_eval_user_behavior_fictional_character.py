@@ -20,12 +20,10 @@ the evals running green when the variant is enabled.
 from __future__ import annotations
 
 import pytest
-
 from evals.framework.user_behavior_fictional_character import (
     _DIALOGUE_RE,
     FictionalCharacter,
 )
-
 
 # Sentinel genre block used by tests that don't care about the
 # genre string's content but DO need a genre field set on the

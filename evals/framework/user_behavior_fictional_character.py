@@ -53,7 +53,6 @@ from dataclasses import dataclass
 
 from evals.framework.user_behavior import UserBehavior
 
-
 # Match a <dialogue>...</dialogue> block.  Non-greedy so the FIRST
 # block wins if the model emits multiple; ``DOTALL`` so multi-line
 # dialogue (a paragraph across newlines) extracts cleanly.  Case-

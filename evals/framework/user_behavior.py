@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import re
 
-
 # Per-turn reminder injected ahead of every target response we feed
 # back to the user-LLM.  Keeps the persona salient across many turns:
 # without it, observed drift had the user-LLM gradually adopting the
