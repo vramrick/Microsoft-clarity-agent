@@ -77,7 +77,7 @@ async def _drain_events(
             # into the next turn.  Wait briefly for the task to finish.
             try:
                 await asyncio.wait_for(task, timeout=30.0)
-            except (TimeoutError, Exception):
+            except Exception:
                 pass  # Backend is stuck or errored — move on.
             # Flush the event queue.
             while not session._event_queue.empty():
