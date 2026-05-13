@@ -551,7 +551,7 @@ fn main() {
 
                 // ---- Wait for server, then navigate ----
                 let window = app.get_webview_window("main").expect("no main window");
-                let server_url = format!("http://localhost:{}", port);
+                let server_url = format!("http://127.0.0.1:{}", port);
 
                 std::thread::spawn(move || {
                     let mut log_poll = open_startup_log();
