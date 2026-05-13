@@ -28,6 +28,7 @@ export default function ChatPanel() {
     currentProcess,
     connected,
     error,
+    statusPhase,
     sendMessage,
     startProcess,
     stopGeneration,
@@ -269,6 +270,11 @@ export default function ChatPanel() {
                       style={{ animationDelay: "0.3s" }}
                     />
                   </div>
+                  {statusPhase && (
+                    <span className="text-xs text-body-muted italic">
+                      {statusPhase}
+                    </span>
+                  )}
                   {(turnTokens > 0 || turnCost > 0) && (
                     <span
                       className="text-xs text-body-faint font-mono tabular-nums"

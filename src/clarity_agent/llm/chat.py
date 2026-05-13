@@ -28,6 +28,7 @@ from typing import Any, ClassVar
 from clarity_agent.llm.types import (
     CostCallback,
     LLMResponse,
+    StatusCallback,
     TextDeltaCallback,
     ToolCallback,
     ToolHandler,
@@ -58,6 +59,7 @@ class ChatBackend(ABC):
     on_cost: CostCallback | None = None
     on_usage: UsageCallback | None = None
     on_warning: WarnCallback | None = None
+    on_status: StatusCallback | None = None
     supports_tools: bool = False
 
     TIER_DEFAULTS: ClassVar[dict[str, str]] = {}

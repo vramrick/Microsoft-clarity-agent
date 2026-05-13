@@ -16,7 +16,8 @@ export type WsServerMessage =
   | { type: "model_changed"; tier: string; model: string; auto: boolean }
   | { type: "session_started" }
   | { type: "error"; message: string; category?: string; hint?: string; retryable?: boolean }
-  | { type: "warning"; message: string };
+  | { type: "warning"; message: string }
+  | { type: "status"; phase: string };
 
 // Chat UI state
 export interface ChatMessage {

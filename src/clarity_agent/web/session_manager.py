@@ -134,6 +134,7 @@ class WebSessionAdapter:
         backend.on_cost = self._on_cost
         backend.on_usage = self._on_usage
         backend.on_warning = self._on_warning
+        backend.on_status = self._on_status
 
         # If we have no session to resume, load recent transcripts as context
         # so the LLM can catch up on prior work.
@@ -178,6 +179,20 @@ class WebSessionAdapter:
         self._loop.call_soon_threadsafe(
             self._event_queue.put_nowait,
             {"type": "cost", "cost_usd": cost_usd},
+        )
+
+    def _on_status(self, phase: str) -> None:
+        """Synchronous callback for coalesced status updates.
+
+        Ephemeral: the frontend should display the latest phase
+        transiently (overwriting the previous one), not append to
+        chat history.
+        """
+        if self._loop is None or self._cancelled:
+            return
+        self._loop.call_soon_threadsafe(
+            self._event_queue.put_nowait,
+            {"type": "status", "phase": phase},
         )
 
     def _on_usage(self, usage: TokenUsage) -> None:
