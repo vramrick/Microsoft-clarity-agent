@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -356,7 +356,7 @@ def record_decision(
     content_parts: list[str] = [
         f"# Decision: {title}\n",
         "**Status:** decided\n",
-        f"**Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n",
+        f"**Date:** {datetime.now(UTC).strftime('%Y-%m-%d')}\n",
         f"\n## Context\n\n{context}\n",
         f"\n## Decision\n\n{decision}\n",
         f"\n## Rationale\n\n{rationale}\n",
