@@ -90,13 +90,14 @@ def clarity_env_path() -> Path:
 def clarity_projects_dir() -> Path:
     """Return the default directory for user project workspaces.
 
-    Always ``~/Clarity Projects/`` — project directories are the user's
-    documents and survive uninstall on all platforms.
+    Uses ``~/clarity-projects/`` on all platforms.  This lives directly
+    under the home directory rather than inside ``~/Documents/`` to
+    avoid triggering macOS TCC prompts for Documents folder access —
+    the app should request only the permissions it actually needs.
+
+    Project directories are the user's documents and survive uninstall.
     """
-    if sys.platform == "darwin" or sys.platform == "win32":
-        return Path.home() / "Documents" / "Clarity Projects"
-    else:
-        return Path.home() / "Clarity Projects"
+    return Path.home() / "clarity-projects"
 
 
 # The two possible names for the protocol directory.
