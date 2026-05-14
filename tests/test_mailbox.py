@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -686,42 +687,42 @@ class TestMailboxLockfiles:
     """Lockfile methods track async thinker progress."""
 
     def test_create_lock(self, tmp_path: Path) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         pd = tmp_path / ".clarity-protocol"
         mb = Mailbox.create(pd, "test-op", _make_config())
-        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        expires = datetime.now(UTC) + timedelta(hours=1)
         path = mb.create_lock("sec-thinker", expires)
         assert path.exists()
         data = json.loads(path.read_text())
         assert data["thinker"] == "sec-thinker"
 
     def test_active_locks_returns_non_expired(self, tmp_path: Path) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         pd = tmp_path / ".clarity-protocol"
         mb = Mailbox.create(pd, "test-op", _make_config())
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
         mb.create_lock("alive", future)
         locks = mb.active_locks()
         assert len(locks) == 1
         assert locks[0].thinker == "alive"
 
     def test_active_locks_excludes_expired(self, tmp_path: Path) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         pd = tmp_path / ".clarity-protocol"
         mb = Mailbox.create(pd, "test-op", _make_config())
-        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        past = datetime.now(UTC) - timedelta(hours=1)
         mb.create_lock("expired", past)
         assert mb.active_locks() == []
 
     def test_remove_lock_idempotent(self, tmp_path: Path) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         pd = tmp_path / ".clarity-protocol"
         mb = Mailbox.create(pd, "test-op", _make_config())
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
         mb.create_lock("target", future)
         mb.remove_lock("target")
         assert mb.active_locks() == []
@@ -729,12 +730,12 @@ class TestMailboxLockfiles:
         mb.remove_lock("target")
 
     def test_clean_expired_locks(self, tmp_path: Path) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         pd = tmp_path / ".clarity-protocol"
         mb = Mailbox.create(pd, "test-op", _make_config())
-        past = datetime.now(timezone.utc) - timedelta(hours=1)
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        past = datetime.now(UTC) - timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
         mb.create_lock("expired-one", past)
         mb.create_lock("still-alive", future)
         removed = mb.clean_expired_locks()
@@ -742,11 +743,11 @@ class TestMailboxLockfiles:
         assert len(mb.active_locks()) == 1
 
     def test_locks_invisible_to_list_items(self, tmp_path: Path) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         pd = tmp_path / ".clarity-protocol"
         mb = Mailbox.create(pd, "test-op", _make_config())
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
         mb.create_lock("sec-thinker", future)
         assert mb.list_items() == []
 

@@ -8,7 +8,7 @@ read and think about the material.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from clarity_agent.packet import Packet, register_format
 
@@ -60,7 +60,7 @@ def render_markdown(packet: Packet) -> bytes:
                     out.append("\n\n")
 
     # Footer.
-    now: str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now: str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     out.append(f"---\n\n*Generated {now}*\n")
 
     return "".join(out).encode("utf-8")

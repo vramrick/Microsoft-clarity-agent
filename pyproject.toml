@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "clarity-agent"
 version = "0.1.1"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 description = "Implementation library for the clarity protocol framework"
 dependencies = [
   "prompt-toolkit>=3.0",
@@ -53,7 +53,7 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 100
 src = ["src", "tests", "dev-tools"]
 
@@ -77,7 +77,7 @@ ignore = [
 
 [tool.pyright]
 extraPaths = ["src"]
-pythonVersion = "3.10"
+pythonVersion = "3.12"
 typeCheckingMode = "basic"
 # Files with heavy third-party SDK types that pyright can't resolve
 # without installed stubs. Suppress until stubs are available.

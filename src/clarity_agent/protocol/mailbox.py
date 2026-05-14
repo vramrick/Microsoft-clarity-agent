@@ -20,7 +20,7 @@ import json
 import re
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
 
@@ -261,7 +261,7 @@ class Mailbox:
                 f"(e.g. 'auth-bypass', '001-sql-injection')."
             )
 
-        now: str = datetime.now(timezone.utc).strftime(_TIMESTAMP_FMT)
+        now: str = datetime.now(UTC).strftime(_TIMESTAMP_FMT)
         counter: int = 0
 
         while True:
@@ -328,7 +328,7 @@ class Mailbox:
         if not self.exists:
             raise MailboxNotFoundError(f"Mailbox '{self.name}' does not exist")
 
-        now: str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        now: str = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         snapshot_dir: Path = self.archive_dir / f"snapshot-{now}"
         snapshot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -385,7 +385,7 @@ class Mailbox:
             raise MailboxNotFoundError(f"Mailbox '{self.name}' does not exist")
         lock_data: dict[str, str] = {
             "thinker": thinker_name,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "expires_at": expires_at.isoformat(),
         }
         lock_path: Path = self.mailbox_dir / f"_{thinker_name}{self._LOCK_SUFFIX}"
@@ -415,7 +415,7 @@ class Mailbox:
         """
         if not self.exists:
             return []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result: list[LockInfo] = []
         for path in self.mailbox_dir.iterdir():
             if path.name.startswith("_") and path.name.endswith(self._LOCK_SUFFIX):
@@ -440,7 +440,7 @@ class Mailbox:
         """
         if not self.exists:
             raise MailboxNotFoundError(f"Mailbox '{self.name}' does not exist")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         removed: list[str] = []
         for path in self.mailbox_dir.iterdir():
             if path.name.startswith("_") and path.name.endswith(self._LOCK_SUFFIX):

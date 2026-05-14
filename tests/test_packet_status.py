@@ -6,6 +6,7 @@ hash recording, next-action recommendations, and output formatting.
 
 from __future__ import annotations
 
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -479,7 +480,7 @@ class TestProcessAvailability:
         self, protocol_dir: Path,
     ) -> None:
         """failure-brainstorming is unavailable when async thinkers are running."""
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         Mailbox.create(protocol_dir, "failure-brainstorm", {
             "display_name": "failure brainstorming",
@@ -489,7 +490,7 @@ class TestProcessAvailability:
         })
         mb = Mailbox(protocol_dir, "failure-brainstorm")
         # Create a lock to simulate an in-progress brainstorm
-        expires = datetime.now(timezone.utc) + timedelta(minutes=30)
+        expires = datetime.now(UTC) + timedelta(minutes=30)
         mb.create_lock("test-thinker", expires)
 
         report = check_packet_status(protocol_dir)
