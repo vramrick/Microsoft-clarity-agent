@@ -262,6 +262,88 @@ fn refresh_recent_menu(app: AppHandle) -> Result<(), String> {
     build_menu(&app).map_err(|e| e.to_string())
 }
 
+// Counter for synthesizing unique window labels for
+// ``open_panel_window``.  Tauri requires window labels to be unique
+// per app; using a monotonic counter avoids any chance of collision
+// while keeping labels short and human-readable in dev tools.  The
+// capability config (``capabilities/default.json``) covers any
+// label matching ``panel-*``.
+static NEXT_PANEL_WINDOW: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Open a new webview window pointed at a given route.
+///
+/// ``route`` is the absolute path component (e.g. ``"/history"`` or
+/// ``"/p/abc123/protocol"``) the new window should navigate to.
+/// The full URL is composed by joining ``route`` against the main
+/// window's current URL — that's where the dynamic sidecar port
+/// lives, so the frontend never has to know it.
+///
+/// ``tabbing_id`` is the macOS tabbing identifier.  Windows that
+/// share this string are automatically merged into a tabbed window
+/// by the OS, giving users the native macOS drag-out / merge
+/// gestures for free.  On Windows and Linux the parameter is
+/// accepted but ignored — those platforms have no equivalent
+/// primitive, so the new window appears as a discrete OS window
+/// until the cross-platform in-app tab bar is built.
+///
+/// Returns ``Err`` with a human-readable message on any failure
+/// (main window missing, URL malformed, window builder failed).
+/// The frontend converts a rejection into the ``window.open``
+/// fallback path so dev / browser environments still get a working
+/// "open in new tab" affordance even when this command isn't
+/// available.
+#[tauri::command]
+fn open_panel_window(
+    app: AppHandle,
+    route: String,
+    tabbing_id: String,
+) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    let main_url = main.url().map_err(|e| e.to_string())?;
+    // ``Url::join`` with a path that begins with ``/`` replaces
+    // the existing path entirely — exactly what we want, since the
+    // main window's URL may have drifted from ``/`` via client-side
+    // routing and we only need its origin (scheme + host + port).
+    let target = main_url
+        .join(&route)
+        .map_err(|e| format!("invalid route {:?}: {}", route, e))?;
+
+    let label = format!(
+        "panel-{}",
+        NEXT_PANEL_WINDOW.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    );
+
+    let builder = tauri::WebviewWindowBuilder::new(
+        &app,
+        &label,
+        tauri::WebviewUrl::External(target),
+    )
+    .title("Clarity")
+    .inner_size(1200.0, 800.0)
+    .min_inner_size(800.0, 600.0);
+
+    // macOS-only: ``tabbing_identifier`` causes the OS to merge
+    // windows sharing this string into a single tabbed window.
+    // Setting it on all of a project's panel windows gives users
+    // the native macOS tabs experience — Cmd+Shift+]/[, drag-out
+    // tear-off, "Move Tab to New Window" in the Window menu,
+    // "Merge All Windows" — for free.
+    #[cfg(target_os = "macos")]
+    let builder = builder.tabbing_identifier(&tabbing_id);
+    // Silence the "unused" warning on non-macOS builds where the
+    // parameter is intentionally unread.  We accept it in the
+    // signature uniformly so the frontend doesn't have to branch
+    // on platform.
+    #[cfg(not(target_os = "macos"))]
+    let _ = &tabbing_id;
+
+    builder.build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -383,7 +465,10 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![refresh_recent_menu])
+        .invoke_handler(tauri::generate_handler![
+            refresh_recent_menu,
+            open_panel_window,
+        ])
         .manage(SidecarState(Mutex::new(None)))
         .setup(|app| {
             build_menu(app.handle())?;

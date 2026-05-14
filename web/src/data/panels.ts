@@ -114,6 +114,73 @@ export function serializePanelId(id: PanelId): string {
   }
 }
 
+/**
+ * The route segment that displays this panel *within its
+ * project's URL space*.  Does NOT include the launcher-mode
+ * project prefix (``/p/<shortId>``) — callers combine this
+ * return value with whatever project-scoping prefix the current
+ * window is using.  See ``buildPanelUrl`` below for the
+ * launcher-aware version.
+ *
+ * Why no prefix: the launcher prefix uses ``project.id`` (a
+ * short identifier from the project registry), whereas
+ * :type:`PanelId`'s ``projectId`` field carries the canonical
+ * absolute path (used as a state-storage key).  These are
+ * different identifier spaces; we don't want this function to
+ * have to translate between them.  Callers that have both
+ * pieces (the short id from ``useParams`` and the PanelId from
+ * state) combine them; this function only knows the panel-type
+ * → route mapping.
+ *
+ * Disambiguators on the PanelId (chat's sessionId, protocol's
+ * docPath) are intentionally not encoded in the route for v1.
+ * The server's session state determines which session/doc is
+ * active within each panel type; per-instance routing is a
+ * future step.
+ */
+export function panelRoute(panelId: PanelId): string {
+  switch (panelId.type) {
+    case "chat":
+      return "/";
+    case "history":
+      return "/history";
+    case "protocol":
+      return "/protocol";
+    case "packet":
+      return "/packet";
+    case "packet-status":
+      return "/packet-status";
+  }
+}
+
+/**
+ * Build the URL to load in a new window for a given panel.
+ *
+ * The optional ``launcherProjectId`` is the short id used in
+ * the URL when we're in launcher mode (``/p/<launcherProjectId>``).
+ * When omitted (single-project mode), the URL is just the
+ * panel route — the server's bound project is implicit.
+ *
+ * Lives next to ``panelRoute`` because callers opening windows
+ * typically have launcher state in scope and shouldn't have to
+ * remember the prefix shape themselves.
+ */
+export function buildPanelUrl(
+  panelId: PanelId,
+  launcherProjectId?: string | null,
+): string {
+  const route = panelRoute(panelId);
+  if (launcherProjectId) {
+    // ``route`` is ``/`` for chat; collapse to just the prefix
+    // rather than emitting a trailing slash that would normalize
+    // differently on different routers.
+    return route === "/"
+      ? `/p/${launcherProjectId}/`
+      : `/p/${launcherProjectId}${route}`;
+  }
+  return route;
+}
+
 // ---------------------------------------------------------------------------
 // Module-level state store
 //

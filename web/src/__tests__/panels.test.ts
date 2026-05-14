@@ -15,7 +15,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type PanelId,
   __resetPanelsForTest,
+  buildPanelUrl,
   getSlot,
+  panelRoute,
   serializePanelId,
   setSlot,
   usePanelSlot,
@@ -108,6 +110,73 @@ describe("serializePanelId", () => {
     expect(serializePanelId(chatA)).toBe(serializePanelId(chatA));
   });
 });
+
+// ---------------------------------------------------------------------------
+// panelRoute / buildPanelUrl — PanelId → URL mappings used by
+// "Open in new window" and similar navigation actions.
+// ---------------------------------------------------------------------------
+
+describe("panelRoute", () => {
+  it("maps each panel type to its react-router route", () => {
+    expect(panelRoute(chatA)).toBe("/");
+    expect(panelRoute(historyA)).toBe("/history");
+    expect(panelRoute(protocolA)).toBe("/protocol");
+    expect(
+      panelRoute({ projectId: "/x", type: "packet" }),
+    ).toBe("/packet");
+    expect(
+      panelRoute({ projectId: "/x", type: "packet-status" }),
+    ).toBe("/packet-status");
+  });
+
+  it("returns the same route regardless of disambiguator", () => {
+    // v1 contract: the route only encodes the panel TYPE, not
+    // per-instance state.  When a window opens at this route,
+    // the server's session state determines which session/doc
+    // is shown.  Per-instance routing (e.g., /protocol/<docPath>)
+    // is a future step.
+    expect(panelRoute(chatA)).toBe(panelRoute(chatA2));
+    expect(panelRoute(protocolA)).toBe(panelRoute(protocolDocA));
+  });
+});
+
+describe("buildPanelUrl", () => {
+  it("returns the bare route in single-project mode", () => {
+    expect(buildPanelUrl(historyA)).toBe("/history");
+    expect(buildPanelUrl(historyA, null)).toBe("/history");
+    expect(buildPanelUrl(historyA, undefined)).toBe("/history");
+  });
+
+  it("prefixes /p/<launcherProjectId> in launcher mode", () => {
+    expect(buildPanelUrl(historyA, "abc123")).toBe("/p/abc123/history");
+    expect(buildPanelUrl(protocolA, "abc123")).toBe("/p/abc123/protocol");
+  });
+
+  it("uses /p/<id>/ (not /p/<id>) for the chat root route", () => {
+    // Guard against accidentally emitting "/p/abc123" with no
+    // trailing slash, which routes differently from "/p/abc123/"
+    // under react-router and produces "Not Found" for the chat
+    // route specifically.
+    expect(buildPanelUrl(chatA, "abc123")).toBe("/p/abc123/");
+  });
+
+  it("uses the launcher short id, NOT PanelId.projectId, for the URL", () => {
+    // PanelId.projectId is the canonical absolute path (used as a
+    // state-storage key); the URL's launcher prefix uses the
+    // short id from the project registry.  This regression guard
+    // catches a future change that accidentally puts the
+    // path-based projectId into the URL.
+    const longPath = "/Users/yzunger/src/some-deep/project-path";
+    const panel: PanelId = {
+      projectId: longPath,
+      type: "history",
+    };
+    const url = buildPanelUrl(panel, "abc123");
+    expect(url).toBe("/p/abc123/history");
+    expect(url).not.toContain(longPath);
+  });
+});
+
 
 // ---------------------------------------------------------------------------
 // Generic slot store — non-React access
