@@ -376,9 +376,9 @@ def _transcript_dir(args: argparse.Namespace, project_dir: Path):
     Function name kept (rather than the more accurate ``_make_transcript``)
     only to minimize diff churn — callers pass the result through as
     the ``transcript`` keyword argument to :class:`ClaritySession`.
-    The returned object encapsulates everything the legacy raw path
-    used to do: directory creation, file naming, structured event
-    persistence.  Issue #35.
+    The returned object encapsulates directory creation, file
+    naming, structured event persistence, and the one-time fold of
+    any pre-#35 timestamp-named transcripts into chapter 1.
     """
     if getattr(args, "no_transcript", False):
         return None

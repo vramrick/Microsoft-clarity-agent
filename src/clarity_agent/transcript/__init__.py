@@ -38,6 +38,7 @@ See GitHub issue #35 and the design comment at
 https://github.com/microsoft/clarity-agent/issues/35#issuecomment-4455572128.
 """
 
+from clarity_agent.transcript._migrate import migrate_legacy_transcripts
 from clarity_agent.transcript.events import (
     AssistantText,
     ChapterStarted,
@@ -72,6 +73,7 @@ __all__ = [
     "UserTurn",
     # Low-level event helpers — for tests and the legacy-transcript
     # migration tooling.
+    "migrate_legacy_transcripts",
     "parse_event",
     "serialize_event",
 ]

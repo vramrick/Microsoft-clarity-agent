@@ -257,6 +257,15 @@ class Transcript:
         # Open lazily on first write or start_new_chapter.  Stays
         # ``None`` for read-only usage.
         self._writer: _ChapterWriter | None = None
+        # Fold any pre-#35 timestamp-named transcripts into chapter
+        # 1 before doing anything else with this project.  Idempotent
+        # and a no-op after first run — just a directory check on
+        # subsequent constructions — so it's safe to live in the
+        # constructor rather than be a per-caller responsibility.
+        # Imported lazily to avoid an import cycle (migration uses
+        # this class).
+        from clarity_agent.transcript._migrate import migrate_legacy_transcripts
+        migrate_legacy_transcripts(self._project_dir)
 
     # ------------------------------------------------------------------
     # Identity

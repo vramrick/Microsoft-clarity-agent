@@ -47,9 +47,7 @@ class TargetSession:
         self.protocol_dir = _protocol_dir(project_dir)
 
         # Transcripts land in the standard ``transcripts/`` directory
-        # under the protocol dir; :class:`Transcript` handles the
-        # chapter-numbered file pair and structured event log.  See
-        # issue #35.
+        # under the protocol dir.,
         from clarity_agent.transcript import Transcript
         self._transcript = Transcript(project_dir)
         self._session = ClaritySession(

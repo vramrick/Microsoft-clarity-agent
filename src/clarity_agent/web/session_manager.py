@@ -108,11 +108,11 @@ class WebSessionAdapter:
         if session_id:
             backend.llm_session_id = session_id
 
-        # Construct the project's transcript.  Snapshot whether the
-        # transcript already had any chapters BEFORE ClaritySession's
-        # construction appends its header event — that's how we tell
-        # "fresh project, nothing to inject" apart from "existing
-        # project with prior conversation, rebuild context from it."
+        # Snapshot whether the transcript already had any chapters
+        # BEFORE ClaritySession's construction appends its header
+        # event — that's how we tell "fresh project, nothing to
+        # inject" apart from "existing project with prior
+        # conversation, rebuild context from it."
         from clarity_agent.transcript import Transcript
         self._project_transcript = Transcript(self.project_dir)
         transcript_was_empty = self._project_transcript.is_empty
