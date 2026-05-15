@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getProtocolTree, getSession } from "../api/client";
@@ -89,8 +89,24 @@ export default function ChatPanel() {
     stickToBottom.current = distanceFromBottom < 80;
   };
 
-  // Auto-scroll on new content, but only if the user is stuck to the bottom.
+  // Pin to the bottom on mount or when history first arrives —
+  // before the browser paints, with no animation — so the user
+  // doesn't see the top of the conversation flash by before the
+  // smooth-scroll catches up.  Runs once per mount (re-mounts on
+  // tab-switch back to Session get a fresh ref and re-pin).
+  const initialScrollDone = useRef(false);
+  const hasContent = messages.length > 0;
+  useLayoutEffect(() => {
+    if (initialScrollDone.current || !hasContent) return;
+    initialScrollDone.current = true;
+    bottomRef.current?.scrollIntoView({ behavior: "instant" as ScrollBehavior });
+  }, [hasContent]);
+
+  // Live updates — streaming text, new turns after the initial
+  // load — get smooth scroll, only when the user is stuck to the
+  // bottom (so reading earlier turns isn't disrupted).
   useEffect(() => {
+    if (!initialScrollDone.current) return;
     if (stickToBottom.current) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }
