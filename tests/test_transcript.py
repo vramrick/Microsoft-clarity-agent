@@ -303,6 +303,86 @@ class TestCompaction:
         assert isinstance(new_events[1], UserTurn)
         assert new_events[1].content == "new"
 
+    def test_compact_splits_at_70_30_by_default(self, project):
+        # ``compact()`` is what the orchestrator calls.  Verify the
+        # default 70/30 split lands the older 70% in the summary
+        # (caller-supplied) and copies the recent 30% verbatim
+        # into the new chapter.
+        t = Transcript(project)
+        for i in range(10):
+            t.write(UserTurn(timestamp=_t(i), content=f"u{i}"))
+            t.write(AssistantText(timestamp=_t(i), content=f"a{i}"))
+        # 20 message events; 70% = 14 → tail is the last 6 events.
+
+        source = t.compact(summary="recap", source_turn_count=14)
+        t.close()
+
+        assert source == 1
+        new_events = list(t.chapter_events(2))
+        # First event is the CompactionSummary, then the 6 tail events.
+        assert isinstance(new_events[0], CompactionSummary)
+        # Verify the tail content: last 3 user turns + last 3 assistant.
+        contents = [getattr(e, "content", None) for e in new_events[1:]]
+        assert "u7" in contents
+        assert "a7" in contents
+        assert "u9" in contents
+        assert "a9" in contents
+
+    def test_compact_custom_split_fraction(self, project):
+        # ``summarize_fraction`` lets callers pick a different ratio.
+        # 50/50 split → half summarized, half kept.
+        t = Transcript(project)
+        for i in range(10):
+            t.write(UserTurn(timestamp=_t(i), content=f"u{i}"))
+
+        t.compact(summary="r", summarize_fraction=0.5)
+        t.close()
+
+        # 10 events / 50% = 5 in tail.
+        tail = [e for e in t.chapter_events(2) if isinstance(e, UserTurn)]
+        assert len(tail) == 5
+        # The newer half: u5..u9.
+        assert [e.content for e in tail] == ["u5", "u6", "u7", "u8", "u9"]
+
+    def test_compact_source_turn_count_default_computed(self, project):
+        # When source_turn_count is omitted, it's derived from the
+        # split — the number of events folded into the summary.
+        t = Transcript(project)
+        for i in range(10):
+            t.write(UserTurn(timestamp=_t(i), content=f"u{i}"))
+
+        t.compact(summary="r")  # default 70% → 7 turns
+        t.close()
+        summary_event = next(
+            e for e in t.chapter_events(2) if isinstance(e, CompactionSummary)
+        )
+        assert summary_event.source_turn_count == 7
+
+    def test_compact_metadata_events_excluded_from_split(self, project):
+        # ProcessStarted, ChapterStarted, SessionResume, etc. are
+        # bookkeeping and shouldn't count as "turns" to summarize
+        # or to copy as tail.  Mix some in and verify they don't
+        # leak into the new chapter.
+        t = Transcript(project)
+        t.write(ChapterStarted(timestamp=T0, project_dir=str(project), backend="X"))
+        t.write(ProcessStarted(timestamp=_t(1), process_name="clarity-agent"))
+        for i in range(5):
+            t.write(UserTurn(timestamp=_t(2 + i), content=f"u{i}"))
+            t.write(AssistantText(timestamp=_t(2 + i), content=f"a{i}"))
+
+        t.compact(summary="r", summarize_fraction=0.5)
+        t.close()
+
+        new_events = list(t.chapter_events(2))
+        # New chapter's only metadata event should be the
+        # CompactionSummary at position 0 — no copied
+        # ProcessStarted/ChapterStarted from the source.
+        non_summary_metadata = [
+            e for e in new_events
+            if isinstance(e, (ProcessStarted, ChapterStarted, SessionResume))
+        ]
+        assert non_summary_metadata == []
+
     def test_context_summary_only_reads_compacted_chapter(self, project):
         # The whole point of compaction: ``context_summary`` should
         # render only the small compacted chapter, not the verbose

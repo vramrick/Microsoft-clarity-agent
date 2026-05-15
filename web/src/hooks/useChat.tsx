@@ -80,7 +80,18 @@ export type ChatAction =
    *  turns.  Dispatched once at mount after ``getCurrentChapter``
    *  resolves; also flips ``historyLoaded`` so the auto-start
    *  effect can run. */
-  | { type: "load_history"; messages: ChatMessage[] };
+  | { type: "load_history"; messages: ChatMessage[] }
+  /** Append a system message marking that compaction occurred,
+   *  so the user has visible context for why earlier turns now
+   *  appear as a summary block.  Also clears the transient
+   *  status phase (the "Summarizing earlier conversation"
+   *  indicator that was set during the LLM call). */
+  | {
+      type: "compaction_complete_event";
+      viaBackend: boolean;
+      sourceChapter: number;
+      sourceTurnCount: number;
+    };
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
@@ -293,6 +304,30 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         historyLoaded: true,
       };
 
+    case "compaction_complete_event": {
+      const turnsText =
+        action.sourceTurnCount === 1 ? "1 turn" : `${action.sourceTurnCount} turns`;
+      const content = action.viaBackend
+        ? `The model summarized its working memory of ${turnsText} from chapter ${action.sourceChapter} to keep within its context window. The full history remains in chapter ${action.sourceChapter} (browsable via History); this chapter starts from the summary.`
+        : `Earlier ${turnsText} were summarized to fit within the model's context window. The full history remains in chapter ${action.sourceChapter} (browsable via History); this chapter starts from the summary.`;
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: crypto.randomUUID(),
+            role: "system",
+            content,
+            timestamp: Date.now(),
+          },
+        ],
+        // The transient "Summarizing earlier conversation" status
+        // was set during the LLM call; clear it now that compaction
+        // is done.
+        statusPhase: null,
+      };
+    }
+
     default:
       return state;
   }
@@ -419,6 +454,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         break;
       case "status":
         dispatch({ type: "status_event", phase: msg.phase });
+        break;
+      case "compaction_complete":
+        dispatch({
+          type: "compaction_complete_event",
+          viaBackend: msg.via_backend,
+          sourceChapter: msg.source_chapter,
+          sourceTurnCount: msg.source_turn_count,
+        });
         break;
       case "error":
         dispatch({

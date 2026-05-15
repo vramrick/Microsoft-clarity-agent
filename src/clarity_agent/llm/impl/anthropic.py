@@ -29,6 +29,24 @@ _ANTHROPIC_TIER_DEFAULTS: dict[str, str] = {
     "fast": "claude-haiku-4-5",
 }
 
+# Context-window size (in tokens) per model.  Co-located with the
+# tier defaults so a single backend file declares everything about
+# its known models.  The compaction trigger compares the last turn's
+# ``input_tokens`` (from the provider's response) against this;
+# users on a model not listed here can add an override via
+# ``Settings.context_window_overrides``.
+#
+# Note: some providers (e.g. the Claude Agent SDK) apply their own
+# context management server-side.  Because we measure the real
+# ``input_tokens`` the provider reports, those providers' internal
+# compaction naturally keeps our trigger cold — we only fire as the
+# safety net when the provider isn't handling things itself.
+_ANTHROPIC_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4-7": 200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-haiku-4-5": 200_000,
+}
+
 
 class AnthropicClient(LLMClient):
     """Low-level async LLM client wrapping :class:`anthropic.AsyncAnthropic`.
@@ -38,6 +56,7 @@ class AnthropicClient(LLMClient):
     """
 
     TIER_DEFAULTS = _ANTHROPIC_TIER_DEFAULTS
+    MODEL_CONTEXT_WINDOWS = _ANTHROPIC_MODEL_CONTEXT_WINDOWS
 
     def __init__(self, *, api_key: str) -> None:
         self._client = _anthropic_mod.AsyncAnthropic(api_key=api_key)

@@ -54,11 +54,12 @@ from clarity_agent.transcript.events import (
     parse_event,
     serialize_event,
 )
-from clarity_agent.transcript.transcript import Transcript
+from clarity_agent.transcript.transcript import CompactionResult, Transcript
 
 __all__ = [
     # The headline class.
     "Transcript",
+    "CompactionResult",
     # Event types — needed by any caller that writes events.
     "AssistantText",
     "ChapterStarted",

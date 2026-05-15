@@ -81,6 +81,38 @@ UsageCallback = Callable[[TokenUsage], None]
 
 
 @dataclass
+class CompactionInfo:
+    """Backend-provided signal that an internal compaction occurred.
+
+    Fired by a :class:`ChatBackend` when the provider has performed
+    its own context-management compaction (e.g., Claude Agent SDK's
+    auto-compact).  Carries the provider's summary so the orchestrator
+    can record it directly rather than producing its own summary —
+    the provider already paid for the summarization LLM call, and
+    their summary reflects exactly what the model is now operating on.
+
+    Phase 2 v1: the type + callback are wired into the orchestrator,
+    but no backend currently produces these signals.  Phase 2.5 will
+    add SDK-specific detection (PreCompact hook + JSONL transcript
+    inspection for ``isCompactSummary`` entries).
+    """
+
+    summary: str
+    """The provider's summary of the compacted-away portion of the
+    conversation, ready to be stored in a
+    :class:`~clarity_agent.transcript.CompactionSummary` event."""
+
+    source_turn_count: int = 0
+    """Number of turns the summary represents, when known.  Used by
+    the History UI to label the summary (e.g., "summary of 42 prior
+    turns").  ``0`` when the backend can't report a count."""
+
+
+# Callback type for backend-signaled compaction events.
+CompactionCallback = Callable[[CompactionInfo], None]
+
+
+@dataclass
 class TextBlock:
     """A text content block in an LLM response."""
 

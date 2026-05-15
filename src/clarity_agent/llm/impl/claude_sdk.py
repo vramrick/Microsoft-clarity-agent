@@ -18,7 +18,10 @@ from typing import Any
 
 from clarity_agent.llm.chat import ChatBackend
 from clarity_agent.llm.client import extract_tool_detail, truncate
-from clarity_agent.llm.impl.anthropic import _ANTHROPIC_TIER_DEFAULTS
+from clarity_agent.llm.impl.anthropic import (
+    _ANTHROPIC_MODEL_CONTEXT_WINDOWS,
+    _ANTHROPIC_TIER_DEFAULTS,
+)
 from clarity_agent.llm.types import (
     LLMResponse,
     TextBlock,
@@ -60,6 +63,13 @@ class SdkChatBackend(ChatBackend):
     # We share defaults with the Anthropic API backend -- same company and same
     # models, just a different interface.
     TIER_DEFAULTS = _ANTHROPIC_TIER_DEFAULTS
+    # The SDK backend talks to the same Anthropic models as the
+    # direct API path, so the context-window map is shared.  When
+    # the SDK's internal context management compacts a session,
+    # the ``input_tokens`` we capture from ResultMessage reflects
+    # the post-compaction size — keeping our own compaction
+    # trigger naturally cold.
+    MODEL_CONTEXT_WINDOWS = _ANTHROPIC_MODEL_CONTEXT_WINDOWS
 
     def __init__(
         self,

@@ -39,6 +39,15 @@ _GITHUB_TIER_DEFAULTS: dict[str, str] = {
     "fast": "claude-sonnet-4.6",
 }
 
+# Context-window size in tokens.  Copilot serves Claude family
+# models with the standard 200K window; uses ``.`` rather than ``-``
+# in its model names, hence the separate map from the Anthropic
+# table.
+_GITHUB_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-sonnet-4.6": 200_000,
+    "claude-opus-4.6": 200_000,
+}
+
 # Default number of seconds with NO streaming activity from the peer
 # before we declare a turn stuck and raise TimeoutError.  Reset on every
 # SDK event, so a long turn with steady streaming — common for deep
@@ -144,6 +153,7 @@ class CopilotChatBackend(ChatBackend):
 
     supports_tools: bool = True
     TIER_DEFAULTS = _GITHUB_TIER_DEFAULTS
+    MODEL_CONTEXT_WINDOWS = _GITHUB_MODEL_CONTEXT_WINDOWS
 
     def __init__(
         self,

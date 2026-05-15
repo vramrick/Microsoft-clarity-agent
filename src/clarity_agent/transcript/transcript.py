@@ -45,7 +45,8 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
@@ -67,6 +68,28 @@ from clarity_agent.transcript.events import (
 )
 
 _LOG = logging.getLogger(__name__)
+
+
+@dataclass
+class CompactionResult:
+    """Outcome of a compaction run.
+
+    Returned by :meth:`Transcript.compact_with_summarizer` and
+    :meth:`Transcript.external_compaction_occurred` so the
+    orchestrator can signal the UI (and any logging) uniformly
+    regardless of which path produced the summary.
+
+    Attributes:
+        source_chapter: The chapter that was just archived.
+        source_turn_count: How many message-shaped events the
+            summary covers.
+        new_chapter: The chapter the conversation has rolled over
+            into.  Subsequent writes append here.
+    """
+
+    source_chapter: int
+    source_turn_count: int
+    new_chapter: int
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +421,197 @@ class Transcript:
         self._writer = _ChapterWriter(self._project_dir, new_chapter)
         return new_chapter
 
+    def should_compact(
+        self,
+        *,
+        threshold_tokens: int,
+        input_tokens: int = 0,
+    ) -> bool:
+        """Decide whether compaction should fire now.
+
+        Two-sided trigger:
+        * ``input_tokens`` — what the LLM just reported processing on
+          its last turn (the live-session signal).  Passed by the
+          orchestrator from its ``on_usage`` capture.  ``0`` if the
+          orchestrator doesn't have a value yet, in which case only
+          the transcript-size half can trip.
+        * :meth:`estimated_token_count` — what a rebuild from this
+          transcript would consume.  Catches the case where the
+          backend is auto-compacting (so ``input_tokens`` stays
+          cold) but our on-disk record is growing unboundedly.
+
+        Either trigger fires compaction.  The threshold is supplied
+        by the caller (typically ``int(0.85 * model_context_window)``)
+        — kept out of the transcript so callers can lower it for
+        small-context-window models without changing the transcript
+        layer.
+        """
+        if input_tokens > threshold_tokens:
+            return True
+        if self.estimated_token_count() > threshold_tokens:
+            return True
+        return False
+
+    def compact_with_summarizer(
+        self,
+        *,
+        threshold_tokens: int,
+        summarize_fn: Callable[[list[Event]], str],
+        input_tokens: int = 0,
+        summarize_fraction: float = 0.70,
+    ) -> CompactionResult | None:
+        """Check thresholds and, if exceeded, run compaction.
+
+        Composes :meth:`should_compact` + :meth:`compact` with an
+        injected ``summarize_fn`` that produces the summary text
+        from the events being folded away.  Returns ``None`` when
+        no compaction was needed; otherwise a :class:`CompactionResult`
+        describing what happened.
+
+        ``summarize_fn`` is the orchestrator's bridge to the LLM
+        layer — it typically calls ``backend.chat`` with a
+        summarization prompt while suppressing UI-facing callbacks.
+        Kept as an injection point so the transcript layer stays
+        free of LLM dependencies.
+        """
+        if not self.should_compact(
+            threshold_tokens=threshold_tokens,
+            input_tokens=input_tokens,
+        ):
+            return None
+        to_summarize = self._select_events_to_summarize(summarize_fraction)
+        summary = summarize_fn(to_summarize)
+        source_chapter = self.compact(
+            summary=summary,
+            source_turn_count=len(to_summarize),
+            summarize_fraction=summarize_fraction,
+        )
+        return CompactionResult(
+            source_chapter=source_chapter,
+            source_turn_count=len(to_summarize),
+            new_chapter=self.current_chapter or 0,
+        )
+
+    def external_compaction_occurred(
+        self,
+        *,
+        summary: str,
+        source_turn_count: int,
+        summarize_fraction: float = 0.70,
+    ) -> CompactionResult:
+        """Record a compaction the backend performed on its side.
+
+        Same chapter mechanics as :meth:`compact`, but the summary
+        text comes from the provider (e.g., the Claude Agent SDK's
+        ``isCompactSummary`` transcript entry) rather than from a
+        local summarization call.  No threshold check — the backend
+        already decided this was needed; we just keep our transcript
+        in sync.
+
+        Returns a :class:`CompactionResult` so the orchestrator can
+        signal the UI uniformly with the threshold-driven path.
+        """
+        source_chapter = self.compact(
+            summary=summary,
+            source_turn_count=source_turn_count,
+            summarize_fraction=summarize_fraction,
+        )
+        return CompactionResult(
+            source_chapter=source_chapter,
+            source_turn_count=source_turn_count,
+            new_chapter=self.current_chapter or 0,
+        )
+
+    def _select_events_to_summarize(self, summarize_fraction: float) -> list[Event]:
+        """The older portion of message events that would be folded
+        into a summary at the given split fraction.
+
+        Same selection rule :meth:`compact` uses internally; exposed
+        as a helper so :meth:`compact_with_summarizer` can hand the
+        slice to ``summarize_fn`` without recomputing the split.
+        """
+        from clarity_agent.transcript.events import (
+            ChapterStarted,
+            CompactionSummary as _CSEvent,
+            ModelOverride,
+            ProcessStarted,
+            SessionResume,
+        )
+        metadata_types = (
+            ChapterStarted, SessionResume, _CSEvent,
+            ProcessStarted, ModelOverride,
+        )
+        message_events = [
+            e for e in self.current_events() if not isinstance(e, metadata_types)
+        ]
+        split_idx = int(len(message_events) * summarize_fraction)
+        return message_events[:split_idx]
+
+    def compact(
+        self,
+        *,
+        summary: str,
+        source_turn_count: int | None = None,
+        summarize_fraction: float = 0.70,
+    ) -> int:
+        """Roll the current chapter, folding the older portion into a summary.
+
+        Splits the current chapter's message-shaped events at
+        ``summarize_fraction`` (default 70/30): everything before
+        becomes the summary (the caller supplies the summary text);
+        everything after is copied verbatim into the new chapter so
+        recent context is preserved.
+
+        ``summary`` is the caller's responsibility — it might come
+        from an LLM-generated digest (the threshold-based path in
+        :class:`WebSessionAdapter`), or from a backend's own
+        provider-side compaction signal.  This method only handles
+        the file-mechanics half.
+
+        Metadata events (:class:`ChapterStarted`, :class:`SessionResume`,
+        :class:`CompactionSummary`, :class:`ProcessStarted`,
+        :class:`ModelOverride`) are excluded from both halves —
+        they're bookkeeping, not turns.  The new chapter gets its
+        own fresh header via the :meth:`start_compacted_chapter`
+        call beneath the hood.
+
+        Returns the source chapter number (the one that was just
+        archived) so the caller can refer to it in UI signaling or
+        diagnostic output.
+        """
+        from clarity_agent.transcript.events import (
+            ChapterStarted,
+            CompactionSummary,
+            ModelOverride,
+            ProcessStarted,
+            SessionResume,
+        )
+        metadata_types = (
+            ChapterStarted, SessionResume, CompactionSummary,
+            ProcessStarted, ModelOverride,
+        )
+        all_events = list(self.current_events())
+        message_events = [
+            e for e in all_events if not isinstance(e, metadata_types)
+        ]
+        split_idx = int(len(message_events) * summarize_fraction)
+        tail = message_events[split_idx:]
+        source_chapter = self.current_chapter or 0
+        if source_turn_count is None:
+            source_turn_count = split_idx
+
+        # ``start_compacted_chapter`` writes the ``CompactionSummary``
+        # as the new chapter's first entry; subsequent writes append
+        # the verbatim tail.
+        self.start_compacted_chapter(
+            summary=summary,
+            source_chapter=source_chapter,
+            source_turn_count=source_turn_count,
+        )
+        for event in tail:
+            self.write(event)
+        return source_chapter
+
     def start_compacted_chapter(
         self,
         summary: str,
@@ -504,6 +718,53 @@ class Transcript:
         message-producing events.
         """
         return build_anthropic_messages(self.current_events())
+
+    def estimated_token_count(self) -> int:
+        """Rough estimate of the current chapter's content size in tokens.
+
+        Sums the character length of message-shaped events (UserTurn,
+        AssistantText, ToolUse, ToolUseText, CompactionSummary) in
+        the current chapter and divides by 4 — a conservative
+        chars-per-token ratio that fits English text well and is
+        usually a slight over-estimate (good — we'd rather compact
+        a bit early than too late).
+
+        Used by the compaction orchestrator as the "rebuild safety"
+        trigger: if a rebuild via :meth:`context_summary` or
+        :meth:`anthropic_messages` would produce output close to the
+        model's context window, fire compaction even if the live
+        session's ``input_tokens`` are still under control (which
+        happens when the provider is compacting internally but our
+        transcript is growing).
+
+        Metadata events (ChapterStarted, SessionResume,
+        ProcessStarted, ModelOverride) are skipped — they contribute
+        only sub-headings to the rendered output, not bulk content.
+        """
+        from clarity_agent.transcript.events import (
+            AssistantText,
+            CompactionSummary,
+            ToolUse,
+            ToolUseText,
+            UserTurn,
+        )
+
+        total_chars = 0
+        for event in self.current_events():
+            if isinstance(event, (UserTurn, AssistantText)):
+                total_chars += len(event.content)
+            elif isinstance(event, ToolUse):
+                # ``str(input)`` is a rough proxy — tool inputs are
+                # dicts that go through extract_tool_detail when
+                # rendered, but for a size estimate the raw repr is
+                # close enough and avoids the rendering cost on
+                # every check.
+                total_chars += len(event.name) + len(str(event.input))
+            elif isinstance(event, ToolUseText):
+                total_chars += len(event.name) + len(event.detail)
+            elif isinstance(event, CompactionSummary):
+                total_chars += len(event.summary)
+        return total_chars // 4
 
     def chat_messages(self) -> list[dict[str, Any]]:
         """Render the current chapter as chat-message dicts for the UI.

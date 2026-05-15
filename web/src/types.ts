@@ -15,7 +15,18 @@ export type WsServerMessage =
   | { type: "model_changed"; tier: string; model: string; auto: boolean }
   | { type: "error"; message: string; category?: string; hint?: string; retryable?: boolean }
   | { type: "warning"; message: string }
-  | { type: "status"; phase: string };
+  | { type: "status"; phase: string }
+  | {
+      type: "compaction_complete";
+      /** True if the provider's own auto-compaction produced the
+       *  summary; false if our threshold-based fallback ran the
+       *  summarization LLM call ourselves. */
+      via_backend: boolean;
+      /** Which chapter was just archived. */
+      source_chapter: number;
+      /** Number of turns folded into the summary. */
+      source_turn_count: number;
+    };
 
 // Chat UI state
 export interface ChatMessage {

@@ -72,6 +72,22 @@ class WebSessionAdapter:
         self._cancelled = False
         # Partial text accumulated from events before cancellation.
         self._partial_text: list[str] = []
+        # Most recent ``input_tokens`` value from the backend's
+        # ``on_usage`` callback.  The post-turn compaction check
+        # compares this against the model's context window — if the
+        # backend isn't compacting internally and this approaches
+        # the wall, we fire our own compaction.  Int assignment is
+        # atomic in CPython so no lock needed despite the executor-
+        # thread writes.
+        self._latest_input_tokens: int = 0
+        # Set when the backend has signaled it performed its own
+        # compaction (e.g., SDK PreCompact + transcript inspection).
+        # Drained by the post-turn check, which records the
+        # provider's summary in our transcript and rolls our chapter.
+        # Phase 2 v1: no backend currently sets this; the
+        # threshold-based fallback is what actually triggers
+        # compaction.
+        self._pending_backend_compaction: Any | None = None
 
     def _setup_feedback_tools(self) -> None:
         """Set up the feedback tool as baseline for all chat calls."""
@@ -142,6 +158,7 @@ class WebSessionAdapter:
         backend.on_usage = self._on_usage
         backend.on_warning = self._on_warning
         backend.on_status = self._on_status
+        backend.on_compaction = self._on_backend_compaction
 
         # Context-restore path: when the SDK has no session to resume
         # AND there's prior conversation in the transcript, synthesize
@@ -253,7 +270,16 @@ class WebSessionAdapter:
         )
 
     def _on_usage(self, usage: TokenUsage) -> None:
-        """Synchronous callback for token usage events from the executor thread."""
+        """Synchronous callback for token usage events from the executor thread.
+
+        Also captures ``input_tokens`` as the running context-size
+        signal for the compaction trigger.  The latest value is what
+        the model just processed on this turn — if it's approaching
+        the window, compaction fires after the turn completes.
+        """
+        # Capture before the queue dispatch so a post-turn read sees
+        # the freshest value.  Int assignment is atomic in CPython.
+        self._latest_input_tokens = usage.input_tokens
         if self._loop is None:
             return
         self._loop.call_soon_threadsafe(
@@ -264,6 +290,194 @@ class WebSessionAdapter:
                 "output_tokens": usage.output_tokens,
             },
         )
+
+    def _on_backend_compaction(self, info: Any) -> None:
+        """Backend-signaled compaction callback.
+
+        Fires from the executor thread when the backend has performed
+        its own context-management compaction.  We stash the info;
+        the post-turn check in :meth:`chat` consumes it and rolls
+        our chapter — that way the rollover happens on the asyncio
+        loop with the rest of the transcript writes serialized
+        through the writer's lock.
+        """
+        self._pending_backend_compaction = info
+
+    # Fraction of the model's context window at which we force
+    # compaction even if the provider hasn't signaled it.
+    # Deliberately high (85%): when the backend is auto-compacting
+    # internally, the live ``input_tokens`` count stays well under
+    # this threshold, so we stay cold.  We only fire as the safety
+    # net when no compaction is happening anywhere.
+    _COMPACTION_THRESHOLD_FRACTION: float = 0.85
+
+    # Fraction of message events to fold into the summary (keep the
+    # remaining tail verbatim in the new chapter).  70/30 split
+    # preserves recent context — usually what the model needs most
+    # — while still shrinking the chapter substantially.
+    _COMPACTION_SUMMARIZE_FRACTION: float = 0.70
+
+    async def _maybe_compact_after_turn(self) -> None:
+        """Post-turn compaction check.  Thin orchestration around
+        :class:`Transcript` and the backend.
+
+        The decision logic (thresholds), the chapter mechanics
+        (split/roll/copy-tail), and the summarizer composition all
+        live in :class:`Transcript`.  This method's job is the
+        session-lifecycle work that the transcript layer
+        deliberately doesn't know about: getting the threshold from
+        the backend, running the summarizer on the executor thread,
+        signaling the UI before and after, and resetting the
+        backend's SDK session.
+
+        Priority:
+        1. Backend signaled compaction during the turn →
+           :meth:`Transcript.external_compaction_occurred` records
+           the provider's summary; no LLM call from us.
+        2. Threshold-driven path →
+           :meth:`Transcript.compact_with_summarizer` calls back
+           into our summarizer (the executor-bridge below) iff the
+           thresholds are exceeded.
+
+        Called from :meth:`chat` after the response event has been
+        emitted so the user sees their answer before any
+        compaction-related UI activity.
+        """
+        if self._backend is None or self._project_transcript is None:
+            return
+
+        info = self._pending_backend_compaction
+        if info is not None:
+            self._pending_backend_compaction = None
+            await self._signal_compacting()
+            result = self._project_transcript.external_compaction_occurred(
+                summary=info.summary,
+                source_turn_count=info.source_turn_count,
+                summarize_fraction=self._COMPACTION_SUMMARIZE_FRACTION,
+            )
+            await self._post_compaction_cleanup(result, via_backend=True)
+            return
+
+        threshold = int(
+            self._COMPACTION_THRESHOLD_FRACTION
+            * self._backend.context_window_for(self.active_model),
+        )
+        # Short-circuit if neither trigger is over — avoids the
+        # status-event noise on every turn.  The transcript also
+        # checks internally, but emitting the "compacting" phase
+        # only to find nothing to do would flicker the UI.
+        if not self._project_transcript.should_compact(
+            threshold_tokens=threshold,
+            input_tokens=self._latest_input_tokens,
+        ):
+            return
+
+        await self._signal_compacting()
+        # The actual summarization LLM call runs on the executor
+        # (it's a slow blocking call); ``compact_with_summarizer``
+        # invokes our injected ``summarize_fn`` while doing the
+        # split + rollover.
+        result = await self._loop.run_in_executor(  # type: ignore[union-attr]
+            self._executor,
+            partial(
+                self._project_transcript.compact_with_summarizer,
+                threshold_tokens=threshold,
+                input_tokens=self._latest_input_tokens,
+                summarize_fn=self._summarize_events_sync,
+                summarize_fraction=self._COMPACTION_SUMMARIZE_FRACTION,
+            ),
+        )
+        if result is None:
+            # Shouldn't happen given the should_compact guard above,
+            # but be defensive — the transcript re-checks internally.
+            return
+        await self._post_compaction_cleanup(result, via_backend=False)
+
+    async def _signal_compacting(self) -> None:
+        """Surface the in-progress status to the UI before slow work."""
+        await self._event_queue.put({
+            "type": "status",
+            "phase": "Summarizing earlier conversation",
+        })
+
+    async def _post_compaction_cleanup(
+        self, result: Any, *, via_backend: bool,
+    ) -> None:
+        """Session-lifecycle work that runs after the transcript has
+        finished its mechanics: backend SDK session reset, token
+        counter reset, UI completion signal.
+        """
+        backend = self._backend
+        if backend is not None:
+            backend.llm_session_id = None
+        clear_session_state(self.project_dir)
+        self._latest_input_tokens = 0
+        await self._event_queue.put({
+            "type": "compaction_complete",
+            "via_backend": via_backend,
+            "source_chapter": result.source_chapter,
+            "source_turn_count": result.source_turn_count,
+        })
+
+    def _summarize_events_sync(self, events: list) -> str:
+        """Bridge from ``Transcript.compact_with_summarizer`` to the
+        backend's chat path.
+
+        Runs on the executor thread.  Suppresses backend streaming
+        callbacks for the duration so the summarization call
+        doesn't bleed into the user-facing chat stream or write
+        transcript events of its own.
+        """
+        from clarity_agent.transcript._summarize import summarize_chapter
+        backend = self._backend
+        assert backend is not None
+        saved = self._suppress_streaming_callbacks()
+        try:
+            return summarize_chapter(
+                events,
+                summarize_fn=lambda prompt: backend.chat(
+                    prompt, system_prompt=None, model=None,
+                ),
+            )
+        finally:
+            self._restore_streaming_callbacks(saved)
+
+    def _suppress_streaming_callbacks(self) -> dict[str, Any]:
+        """Null out streaming + bookkeeping callbacks; return the saved set.
+
+        Paired with :meth:`_restore_streaming_callbacks`.  The summary
+        LLM call shouldn't fire UI events or write transcript ToolUse
+        records, and shouldn't corrupt the running ``input_tokens``
+        counter with summarization usage — so all those callbacks
+        are temporarily disconnected.
+        """
+        backend = self._backend
+        assert backend is not None
+        saved = {
+            "on_text_delta": backend.on_text_delta,
+            "on_tool_use": backend.on_tool_use,
+            "on_tool_call": backend.on_tool_call,
+            "on_status": backend.on_status,
+            "on_usage": backend.on_usage,
+            "on_cost": backend.on_cost,
+            "on_warning": backend.on_warning,
+        }
+        backend.on_text_delta = None
+        backend.on_tool_use = None
+        backend.on_tool_call = None
+        backend.on_status = None
+        backend.on_usage = None
+        backend.on_cost = None
+        backend.on_warning = None
+        return saved
+
+    def _restore_streaming_callbacks(self, saved: dict[str, Any]) -> None:
+        """Re-attach the callbacks suppressed by :meth:`_suppress_streaming_callbacks`."""
+        backend = self._backend
+        if backend is None:
+            return
+        for name, value in saved.items():
+            setattr(backend, name, value)
 
     def _on_warning(self, message: str) -> None:
         """Synchronous callback for non-fatal backend warnings from the executor thread.
@@ -367,6 +581,13 @@ class WebSessionAdapter:
         self._pending_warnings.clear()
 
         await self._event_queue.put({"type": "response", "content": response})
+
+        # Check post-turn whether compaction should fire.  Runs after
+        # the response event so the user sees the answer first, then
+        # the "Summarizing earlier conversation…" status if needed.
+        # See :meth:`_maybe_compact_after_turn` for the priority logic.
+        await self._maybe_compact_after_turn()
+
         return response
 
     async def start_process(self, process_name: str) -> str:

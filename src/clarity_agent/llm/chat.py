@@ -30,6 +30,7 @@ from clarity_agent.llm.types import (
     LLMResponse,
     StatusCallback,
     TextDeltaCallback,
+    CompactionCallback,
     StructuredToolCallback,
     ToolCallback,
     ToolHandler,
@@ -62,6 +63,12 @@ class ChatBackend(ABC):
     # input dict and provider-assigned id (used by the transcript
     # event log).
     on_tool_call: StructuredToolCallback | None = None
+    # Backend-signaled compaction callback.  Fired when the provider
+    # has performed its own context-management compaction.  Phase
+    # 2 v1: callback is wired through to the orchestrator but no
+    # backend currently emits.  Phase 2.5: SDK backend reads its
+    # PreCompact hook + transcript JSONL and translates.
+    on_compaction: CompactionCallback | None = None
     on_text_delta: TextDeltaCallback | None = None
     on_cost: CostCallback | None = None
     on_usage: UsageCallback | None = None
@@ -74,6 +81,28 @@ class ChatBackend(ABC):
 
     Subclasses override this to declare which concrete models correspond
     to the ``"default"``, ``"deep"``, and ``"fast"`` tiers.
+    """
+
+    MODEL_CONTEXT_WINDOWS: ClassVar[dict[str, int]] = {}
+    """Provider-specific mapping from concrete model strings to their
+    context-window size in tokens.
+
+    Co-located with :attr:`TIER_DEFAULTS` so each backend declares
+    everything about its known models in one place.  Used by the
+    compaction trigger: when the latest turn's ``input_tokens``
+    (or the on-disk transcript's estimated size) approaches the
+    window, compaction fires.  Unknown models fall back to
+    :attr:`DEFAULT_CONTEXT_WINDOW`; users on a non-listed model
+    can override via :attr:`Settings.context_window_overrides`.
+    """
+
+    DEFAULT_CONTEXT_WINDOW: ClassVar[int] = 128_000
+    """Conservative fallback for models not in :attr:`MODEL_CONTEXT_WINDOWS`.
+
+    128K is the modern minimum across major providers (GPT-4 Turbo,
+    GPT-4o, Claude 3+).  Picking this as the floor means an
+    unknown-model project will still get sensible compaction
+    behavior even before the user provides an explicit override.
     """
 
     @property
@@ -103,6 +132,31 @@ class ChatBackend(ABC):
         if model_or_tier is None:
             model_or_tier = "default"
         return self.TIER_DEFAULTS.get(model_or_tier, model_or_tier)
+
+    def context_window_for(self, model_or_tier: str | None = None) -> int:
+        """Return the context-window size (in tokens) for a model.
+
+        Resolution order:
+        1. User override in :attr:`Settings.context_window_overrides`,
+           keyed by the concrete (post-:meth:`resolve_model`) model
+           string.
+        2. The backend's :attr:`MODEL_CONTEXT_WINDOWS` map.
+        3. :attr:`DEFAULT_CONTEXT_WINDOW`.
+
+        Resolves tier names to concrete models first, so callers can
+        pass either form.
+        """
+        model = self.resolve_model(model_or_tier)
+        try:
+            from clarity_agent.settings import Settings
+            overrides = Settings.current().context_window_overrides
+        except Exception:
+            # Settings not initialized (e.g. test contexts that
+            # bypass the normal load path).  Skip overrides.
+            overrides = {}
+        if model in overrides:
+            return overrides[model]
+        return self.MODEL_CONTEXT_WINDOWS.get(model, self.DEFAULT_CONTEXT_WINDOW)
 
     def connect(self) -> None:
         """Establish the backend connection (if needed)."""
@@ -249,6 +303,16 @@ class ClientChatBackend(ChatBackend):
         :meth:`resolve_model` is called with ``None``.
         """
         return {**self._client.TIER_DEFAULTS, **self._tier_overrides}
+
+    @property  # type: ignore[override]
+    def MODEL_CONTEXT_WINDOWS(self) -> dict[str, int]:  # type: ignore[override]
+        """Forward the wrapped client's per-model context-window map.
+
+        The client knows its own models; ``ClientChatBackend`` is a
+        thin wrapper that doesn't add or change them.  Used by the
+        inherited :meth:`context_window_for`.
+        """
+        return self._client.MODEL_CONTEXT_WINDOWS
 
     @property  # type: ignore[override]
     def on_tool_use(self) -> ToolCallback | None:  # type: ignore[override]

@@ -110,6 +110,14 @@ class LLMClient(ABC):
     to :meth:`create_message`.
     """
 
+    MODEL_CONTEXT_WINDOWS: ClassVar[dict[str, int]] = {}
+    """Provider-specific mapping from concrete model strings to their
+    context-window size in tokens.  Co-located with
+    :attr:`TIER_DEFAULTS`; consumed via :meth:`ChatBackend.context_window_for`
+    when the :class:`ClientChatBackend` wrapper forwards from its
+    wrapped client.
+    """
+
     on_tool_use: ToolCallback | None = None
     """Optional callback fired for each tool-use block in a response.
 
