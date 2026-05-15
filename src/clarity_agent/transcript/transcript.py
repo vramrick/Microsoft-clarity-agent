@@ -496,7 +496,7 @@ class Transcript:
         self,
         *,
         summary: str,
-        source_turn_count: int,
+        source_turn_count: int | None = None,
         summarize_fraction: float = 0.70,
     ) -> CompactionResult:
         """Record a compaction the backend performed on its side.
@@ -508,9 +508,22 @@ class Transcript:
         already decided this was needed; we just keep our transcript
         in sync.
 
+        ``source_turn_count=None`` lets the transcript derive the
+        count from its own 70/30 split — the SDK's JSONL doesn't
+        make the exact count cheap to extract, so the SDK detection
+        path uses this default.
+
         Returns a :class:`CompactionResult` so the orchestrator can
         signal the UI uniformly with the threshold-driven path.
         """
+        # Compute the effective count from the split before calling
+        # ``compact`` (which would also do this internally), so the
+        # CompactionResult we return carries the resolved number
+        # rather than ``None``.
+        if source_turn_count is None:
+            source_turn_count = len(
+                self._select_events_to_summarize(summarize_fraction),
+            )
         source_chapter = self.compact(
             summary=summary,
             source_turn_count=source_turn_count,

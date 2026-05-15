@@ -102,10 +102,11 @@ class CompactionInfo:
     conversation, ready to be stored in a
     :class:`~clarity_agent.transcript.CompactionSummary` event."""
 
-    source_turn_count: int = 0
-    """Number of turns the summary represents, when known.  Used by
-    the History UI to label the summary (e.g., "summary of 42 prior
-    turns").  ``0`` when the backend can't report a count."""
+    source_turn_count: int | None = None
+    """Number of turns the summary represents.  ``None`` when the
+    backend can't easily report a count (e.g., the SDK's JSONL
+    doesn't make this cheap to extract); in that case the
+    transcript layer derives the count from its own 70/30 split."""
 
 
 # Callback type for backend-signaled compaction events.

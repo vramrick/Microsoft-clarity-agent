@@ -23,12 +23,46 @@ from clarity_agent.llm.impl.anthropic import (
     _ANTHROPIC_TIER_DEFAULTS,
 )
 from clarity_agent.llm.types import (
+    CompactionInfo,
     LLMResponse,
     TextBlock,
     TokenUsage,
     ToolHandler,
     ToolUseBlock,
 )
+
+
+def _extract_summary_text(entry: dict[str, Any]) -> str:
+    """Pull the human-readable summary string out of an SDK transcript entry.
+
+    ``isCompactSummary`` entries carry the provider-generated
+    summary in their ``message`` field, but the exact shape varies
+    by source:
+
+    * ``message`` is a string → return it.
+    * ``message.content`` is a string → return it.
+    * ``message.content`` is a list of content blocks → join the
+      text from each text block.
+
+    Falls back to ``str(message)`` for unrecognized shapes — better
+    a coarse summary than nothing.
+    """
+    msg = entry.get("message")
+    if isinstance(msg, str):
+        return msg.strip()
+    if isinstance(msg, dict):
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "\n".join(p for p in parts if p).strip()
+    return str(msg or "").strip()
 
 
 def _parse_sdk_usage(usage: dict[str, Any]) -> TokenUsage:
@@ -91,6 +125,15 @@ class SdkChatBackend(ChatBackend):
         self._session_id: str | None = None
         self._current_system_prompt: str | None = None
         self._api_client: Any = None  # lazily-created anthropic.AsyncAnthropic
+        # Set by the PreCompact hook when the SDK is about to
+        # compact.  Drained by the post-query detection in
+        # :meth:`_run_query`: read the JSONL at this path, find new
+        # ``isCompactSummary`` entries, fire ``on_compaction``.
+        self._pending_compact_transcript_path: Path | None = None
+        # UUIDs of ``isCompactSummary`` entries we've already
+        # surfaced via ``on_compaction``.  Prevents firing the same
+        # compaction twice across multiple ``_run_query`` calls.
+        self._seen_compact_summary_uuids: set[str] = set()
 
 
     @property
@@ -105,6 +148,83 @@ class SdkChatBackend(ChatBackend):
         self._session_id = None
         self._current_system_prompt = None
         self._api_client = None
+        self._pending_compact_transcript_path = None
+        self._seen_compact_summary_uuids.clear()
+
+    async def _on_pre_compact(
+        self, hook_input: dict, tool_use_id: str | None, context: dict,
+    ) -> dict:
+        """PreCompact hook handler.
+
+        Fires inside the SDK driver right before it compacts a
+        session.  We just record the transcript path so the
+        post-query detection (:meth:`_detect_and_report_compaction`)
+        can read the post-compaction state once ``query()`` returns.
+
+        Returns an empty :class:`SyncHookJSONOutput` — we don't
+        need to alter the SDK's behavior, just observe.
+        """
+        if hook_input.get("hook_event_name") != "PreCompact":
+            return {}
+        transcript_path = hook_input.get("transcript_path")
+        if transcript_path:
+            self._pending_compact_transcript_path = Path(transcript_path)
+        return {}
+
+    def _detect_and_report_compaction(self) -> None:
+        """Read the SDK's JSONL transcript and surface any new
+        compaction summaries via :attr:`on_compaction`.
+
+        Called once at the end of :meth:`_run_query` when the
+        PreCompact hook fired during that query.  The SDK has by
+        then updated its session file at
+        ``_pending_compact_transcript_path`` with one or more
+        ``isCompactSummary: true`` entries containing the
+        provider's summary of the compacted-away turns.
+
+        UUID-deduplicated against
+        :attr:`_seen_compact_summary_uuids` so the same summary
+        isn't reported twice if the user happens to trigger
+        additional queries before our orchestrator drains the
+        pending compaction signal.
+        """
+        path = self._pending_compact_transcript_path
+        if path is None or not path.exists():
+            return
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as e:
+            print(
+                f"  [compact-detect] could not read transcript {path}: {e}",
+                flush=True,
+            )
+            return
+
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # Quick string filter to skip the 99% of lines that
+            # aren't compaction summaries before the json.loads
+            # cost.  The actual semantic check is the parsed
+            # ``isCompactSummary`` field below.
+            if '"isCompactSummary"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not entry.get("isCompactSummary"):
+                continue
+            uuid = entry.get("uuid")
+            if not uuid or uuid in self._seen_compact_summary_uuids:
+                continue
+            summary = _extract_summary_text(entry)
+            if not summary:
+                continue
+            self._seen_compact_summary_uuids.add(uuid)
+            if self.on_compaction:
+                self.on_compaction(CompactionInfo(summary=summary))
 
     def _build_system_prompt(self, system_prompt: str | None = None) -> str:
         from clarity_agent.app_paths import protocol_dir as _protocol_dir
@@ -182,6 +302,18 @@ class SdkChatBackend(ChatBackend):
             cwd=str(self.project_dir),
             max_turns=25,
             resume=self._session_id,
+            # PreCompact fires immediately before the SDK compacts
+            # an existing session.  We just want to know about it —
+            # the handler captures the transcript path and returns
+            # an empty output so the SDK proceeds normally.  The
+            # actual reading of the post-compaction summary happens
+            # in the post-query detection at the bottom of this
+            # method, by which point the SDK has updated the file.
+            hooks={
+                "PreCompact": [
+                    self._sdk.HookMatcher(hooks=[self._on_pre_compact]),
+                ],
+            },
             stderr=_capture_stderr,
         )
 
@@ -262,6 +394,16 @@ class SdkChatBackend(ChatBackend):
                         f"(SDK: {msg})"
                     ) from e
                 raise
+
+        # If the PreCompact hook fired during this query, the SDK
+        # has by now updated the transcript file with the new
+        # ``isCompactSummary`` entries.  Surface them via
+        # ``on_compaction`` and clear the pending flag.
+        if self._pending_compact_transcript_path is not None:
+            try:
+                self._detect_and_report_compaction()
+            finally:
+                self._pending_compact_transcript_path = None
 
         return "\n".join(text_parts)
 
