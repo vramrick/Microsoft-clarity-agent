@@ -1,13 +1,30 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
+import { type DraftPanelId, useChatDraft } from "../hooks/useChatDraft";
 
 interface MessageInputProps {
   onSend: (text: string) => void;
   disabled?: boolean;
   placeholder?: string;
+  /**
+   * Identity of the chat panel this input belongs to, used to
+   * scope the draft text persisted across mount/unmount.  When
+   * non-null, the in-progress message is stored under this id in
+   * a per-window state store; navigating away and back restores
+   * it.  When ``null``, the input falls back to ephemeral state
+   * (typically because the upstream session id hasn't loaded
+   * yet).  See ``useChatDraft`` / ``data/panels.ts`` for the
+   * full schema.
+   */
+  panelId?: DraftPanelId | null;
 }
 
-export default function MessageInput({ onSend, disabled, placeholder }: MessageInputProps) {
-  const [value, setValue] = useState("");
+export default function MessageInput({
+  onSend,
+  disabled,
+  placeholder,
+  panelId,
+}: MessageInputProps) {
+  const [value, setValue] = useChatDraft(panelId ?? null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSubmit = useCallback(() => {
@@ -19,7 +36,7 @@ export default function MessageInput({ onSend, disabled, placeholder }: MessageI
       textareaRef.current.style.height = "auto";
       textareaRef.current.focus();
     }
-  }, [value, disabled, onSend]);
+  }, [value, disabled, onSend, setValue]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -44,6 +61,16 @@ export default function MessageInput({ onSend, disabled, placeholder }: MessageI
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     }
   }, []);
+
+  // Auto-resize on programmatic value changes too — when a draft
+  // is restored from persistence on mount, or when ``draftKey``
+  // changes to a slot that already has stored content, the value
+  // updates without firing ``onInput``.  Without this effect the
+  // textarea stays at its default single-line height while
+  // displaying a multi-line restored draft.
+  useEffect(() => {
+    handleInput();
+  }, [value, handleInput]);
 
   return (
     <div className="border-t border-border bg-surface/80 backdrop-blur-sm">

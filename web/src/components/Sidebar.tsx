@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { getSession, checkForUpdate, runUpdate, restartServer } from "../api/client";
+import type { PanelId, PanelType } from "../data/panels";
+import { openPanelInNewWindow } from "../data/windows";
 import type { SessionInfo, UpdateRunResult } from "../types";
 import GlossaryTerm from "./GlossaryTerm";
 import ModelSelector from "./ModelSelector";
@@ -23,6 +25,14 @@ interface NavItem {
   icon: React.ReactNode;
   /** If set, wraps the label in a GlossaryTerm tooltip. */
   glossary?: string;
+  /**
+   * Which kind of panel this nav item opens.  Used to construct
+   * the :type:`PanelId` for "Open in new window" — the URL is
+   * built from ``to`` (for routing) while the panel id is built
+   * from ``panelType`` plus session info (for tabbing identifier
+   * and future per-panel state).
+   */
+  panelType: PanelType;
 }
 
 interface NavGroup {
@@ -70,30 +80,78 @@ function buildNavGroups(prefix: string): NavGroup[] {
       label: "Chat",
       basePaths: [`${p}/`, `${p}/history`],
       children: [
-        { to: `${p}/`, label: "Session", end: true, icon: <ChatIcon /> },
-        { to: `${p}/history`, label: "History", icon: <HistoryIcon /> },
+        { to: `${p}/`, label: "Session", end: true, icon: <ChatIcon />, panelType: "chat" },
+        { to: `${p}/history`, label: "History", icon: <HistoryIcon />, panelType: "history" },
       ],
     },
     {
       label: "Protocol",
       basePaths: [`${p}/protocol`, `${p}/packet`, `${p}/packet-status`],
       children: [
-        { to: `${p}/protocol`, label: "Documents", icon: <DocIcon />, glossary: "Documents" },
-        { to: `${p}/packet`, label: "Review Packet", icon: <PacketIcon />, glossary: "Review Packet" },
-        { to: `${p}/packet-status`, label: "Status", icon: <StatusIcon />, glossary: "Status" },
+        { to: `${p}/protocol`, label: "Documents", icon: <DocIcon />, glossary: "Documents", panelType: "protocol" },
+        { to: `${p}/packet`, label: "Review Packet", icon: <PacketIcon />, glossary: "Review Packet", panelType: "packet" },
+        { to: `${p}/packet-status`, label: "Status", icon: <StatusIcon />, glossary: "Status", panelType: "packet-status" },
       ],
     },
   ];
 }
 
+/**
+ * Construct a :type:`PanelId` for a sidebar nav item given the
+ * current session.  Returns ``null`` while session info is
+ * loading — callers should hide the "open in new window"
+ * affordance until a real id can be constructed.
+ *
+ * The canonical ``projectId`` (an absolute path) comes from
+ * ``SessionInfo.project_id`` when the backend provides it,
+ * falling back to ``project_dir``.  Chat panels additionally
+ * require the active ``session_id`` for the discriminated-union
+ * to construct.
+ */
+function buildPanelIdFor(
+  panelType: PanelType,
+  session: SessionInfo | null,
+): PanelId | null {
+  if (!session) return null;
+  const projectId = session.project_id ?? session.project_dir;
+  if (!projectId) return null;
+  switch (panelType) {
+    case "chat":
+      if (!session.session_id) return null;
+      return { projectId, type: "chat", sessionId: session.session_id };
+    case "history":
+    case "protocol":
+    case "packet":
+    case "packet-status":
+      return { projectId, type: panelType };
+  }
+}
+
+/** Square ↗ glyph rendered into the sidebar's "Open in new window" buttons. */
+const OpenInNewWindowIcon = () => (
+  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+  </svg>
+);
+
 function NavGroupItem({
   group,
   index,
   collapsed,
+  session,
+  launcherProjectId,
 }: {
   group: NavGroup;
   index: number;
   collapsed: boolean;
+  /** Current session info; needed to construct PanelIds for the
+   * "Open in new window" affordance.  ``null`` while loading —
+   * the affordance hides until a real id can be built. */
+  session: SessionInfo | null;
+  /** Short URL-safe project id when in launcher mode; ``undefined``
+   * in single-project mode.  Threaded to ``openPanelInNewWindow``
+   * so the new window's URL keeps the same project context. */
+  launcherProjectId?: string;
 }) {
   const location = useLocation();
   const isGroupActive = group.basePaths.some((p) =>
@@ -164,27 +222,59 @@ function NavGroupItem({
         }`}
       >
         <div className="ml-5 border-l border-sidebar-line/40 pb-1">
-          {group.children.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) =>
-                `flex items-center gap-2.5 pl-4 pr-5 py-1.5 text-sm transition-all duration-150 ${
-                  isActive
-                    ? "text-sidebar-text bg-sidebar-active/80 border-l-2 border-accent-focus -ml-px"
-                    : "text-sidebar-text-muted hover:text-sidebar-text hover:pl-5"
-                }`
+          {group.children.map((item) => {
+            // The "open in new window" affordance is per-item:
+            // construct its PanelId from session + the item's
+            // panelType.  Hidden if we can't construct an id
+            // (session not loaded, no project bound, chat with no
+            // session id yet).  The button sits inside the same
+            // flex row as the NavLink with a group-hover reveal so
+            // the layout doesn't shift between hover states.
+            const panelId = buildPanelIdFor(item.panelType, session);
+            const handleOpen = (e: React.MouseEvent) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (panelId) {
+                void openPanelInNewWindow(panelId, launcherProjectId);
               }
-            >
-              {item.icon}
-              <span>
-                {item.glossary
-                  ? <GlossaryTerm term={item.glossary}>{item.label}</GlossaryTerm>
-                  : item.label}
-              </span>
-            </NavLink>
-          ))}
+            };
+            return (
+              <div key={item.to} className="group/nav relative">
+                <NavLink
+                  to={item.to}
+                  end={item.end}
+                  className={({ isActive }) =>
+                    `flex items-center gap-2.5 pl-4 pr-5 py-1.5 text-sm transition-all duration-150 ${
+                      isActive
+                        ? "text-sidebar-text bg-sidebar-active/80 border-l-2 border-accent-focus -ml-px"
+                        : "text-sidebar-text-muted hover:text-sidebar-text hover:pl-5"
+                    }`
+                  }
+                >
+                  {item.icon}
+                  <span>
+                    {item.glossary
+                      ? <GlossaryTerm term={item.glossary}>{item.label}</GlossaryTerm>
+                      : item.label}
+                  </span>
+                </NavLink>
+                {panelId && (
+                  <button
+                    onClick={handleOpen}
+                    aria-label={`Open ${item.label} in a new window`}
+                    title="Open in new window"
+                    className="absolute right-2 top-1/2 -translate-y-1/2
+                      flex items-center justify-center w-5 h-5 rounded
+                      text-sidebar-text-faint hover:text-sidebar-text hover:bg-sidebar-active/60
+                      opacity-0 group-hover/nav:opacity-100 focus:opacity-100
+                      transition-opacity duration-150"
+                  >
+                    <OpenInNewWindowIcon />
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -515,6 +605,8 @@ export default function Sidebar({ collapsed, onToggle, launcherMode, projectId, 
             group={group}
             index={i}
             collapsed={collapsed}
+            session={session}
+            launcherProjectId={projectId}
           />
         ))}
       </nav>

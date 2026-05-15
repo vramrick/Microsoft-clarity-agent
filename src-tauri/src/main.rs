@@ -14,10 +14,9 @@ use tauri::{
 #[cfg(not(dev))]
 use tauri_plugin_shell::ShellExt;
 
-/// Open a startup log file for diagnosing sidecar launch issues.
+/// Open a startup log file for diagnosing sidecar launch and panel-window issues.
 /// Writes to ``%LOCALAPPDATA%/Clarity/clarity-startup.log`` (Windows)
 /// or ``~/.clarity/clarity-startup.log`` (other platforms).
-#[cfg(not(dev))]
 fn open_startup_log() -> Option<std::fs::File> {
     use std::fs::OpenOptions;
     let log_dir = if cfg!(target_os = "windows") {
@@ -142,7 +141,11 @@ fn read_recent_projects() -> Vec<ProjectEntry> {
         } else {
             return Vec::new();
         };
-    entries.sort_by(|a, b| b.last_opened.partial_cmp(&a.last_opened).unwrap_or(std::cmp::Ordering::Equal));
+    entries.sort_by(|a, b| {
+        b.last_opened
+            .partial_cmp(&a.last_opened)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     entries.truncate(MAX_RECENT);
     entries
 }
@@ -174,11 +177,8 @@ fn build_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let mut recent_sub = SubmenuBuilder::new(h, "Open Recent");
     let projects = read_recent_projects();
     for project in &projects {
-        let item = MenuItemBuilder::with_id(
-            format!("recent:{}", project.id),
-            &project.name,
-        )
-        .build(h)?;
+        let item =
+            MenuItemBuilder::with_id(format!("recent:{}", project.id), &project.name).build(h)?;
         recent_sub = recent_sub.item(&item);
     }
     if !projects.is_empty() {
@@ -262,6 +262,126 @@ fn refresh_recent_menu(app: AppHandle) -> Result<(), String> {
     build_menu(&app).map_err(|e| e.to_string())
 }
 
+// Counter for synthesizing unique window labels for
+// ``open_panel_window``.  Tauri requires window labels to be unique
+// per app; using a monotonic counter avoids any chance of collision
+// while keeping labels short and human-readable in dev tools.  The
+// capability config (``capabilities/default.json``) covers any
+// label matching ``panel-*``.
+static NEXT_PANEL_WINDOW: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Append a line to stderr and the persistent startup log.
+/// Used by ``open_panel_window`` so multi-window failures in release
+/// builds (where stderr is invisible without a terminal launch) leave
+/// a trace in ``~/.clarity/clarity-startup.log``.
+fn log_panel(msg: &str) {
+    use std::io::Write;
+    eprintln!("[panel] {}", msg);
+    if let Some(mut f) = open_startup_log() {
+        let _ = writeln!(f, "[panel] {}", msg);
+    }
+}
+
+/// Open a new webview window pointed at a given route.
+///
+/// ``route`` is the absolute path component (e.g. ``"/history"`` or
+/// ``"/p/abc123/protocol"``) the new window should navigate to.
+/// The full URL is composed by joining ``route`` against the main
+/// window's current URL — that's where the dynamic sidecar port
+/// lives, so the frontend never has to know it.
+///
+/// ``tabbing_id`` is the macOS tabbing identifier.  Windows that
+/// share this string are automatically merged into a tabbed window
+/// by the OS, giving users the native macOS drag-out / merge
+/// gestures for free.  On Windows and Linux the parameter is
+/// accepted but ignored — those platforms have no equivalent
+/// primitive, so the new window appears as a discrete OS window
+/// until the cross-platform in-app tab bar is built.
+///
+/// ``title`` is the OS window title — shown in the dock /
+/// taskbar / window switcher.  Computed on the frontend (see
+/// ``panelTitle`` in ``web/src/data/panels.ts``) so the
+/// panel-type taxonomy lives in one place; the Rust side just
+/// renders whatever string it receives.
+///
+/// Returns ``Err`` with a human-readable message on any failure
+/// (main window missing, URL malformed, window builder failed).
+/// The frontend converts a rejection into the ``window.open``
+/// fallback path so dev / browser environments still get a working
+/// "open in new tab" affordance even when this command isn't
+/// available.
+#[tauri::command]
+fn open_panel_window(
+    app: AppHandle,
+    route: String,
+    tabbing_id: String,
+    title: String,
+) -> Result<(), String> {
+    log_panel(&format!(
+        "open_panel_window called: route={:?} tabbing_id={:?} title={:?}",
+        route, tabbing_id, title,
+    ));
+    let main = app.get_webview_window("main").ok_or_else(|| {
+        let e = "main window not found".to_string();
+        log_panel(&format!("error: {}", e));
+        e
+    })?;
+    let main_url = main.url().map_err(|e| {
+        let msg = e.to_string();
+        log_panel(&format!("error: main.url() failed: {}", msg));
+        msg
+    })?;
+    log_panel(&format!("main_url = {}", main_url));
+    // ``Url::join`` with a path that begins with ``/`` replaces
+    // the existing path entirely — exactly what we want, since the
+    // main window's URL may have drifted from ``/`` via client-side
+    // routing and we only need its origin (scheme + host + port).
+    let target = main_url.join(&route).map_err(|e| {
+        let msg = format!("invalid route {:?}: {}", route, e);
+        log_panel(&format!("error: {}", msg));
+        msg
+    })?;
+    log_panel(&format!("target = {}", target));
+    if target.origin() != main_url.origin() {
+        return Err(format!("unexpected route {}", target));
+    }
+
+    let label = format!(
+        "panel-{}",
+        NEXT_PANEL_WINDOW.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    );
+    log_panel(&format!("label = {}", label));
+
+    let builder =
+        tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(target))
+            .title(&title)
+            .inner_size(1200.0, 800.0)
+            .min_inner_size(800.0, 600.0);
+
+    // macOS-only: ``tabbing_identifier`` causes the OS to merge
+    // windows sharing this string into a single tabbed window.
+    // Setting it on all of a project's panel windows gives users
+    // the native macOS tabs experience — Cmd+Shift+]/[, drag-out
+    // tear-off, "Move Tab to New Window" in the Window menu,
+    // "Merge All Windows" — for free.
+    #[cfg(target_os = "macos")]
+    let builder = builder.tabbing_identifier(&tabbing_id);
+    // Silence the "unused" warning on non-macOS builds where the
+    // parameter is intentionally unread.  We accept it in the
+    // signature uniformly so the frontend doesn't have to branch
+    // on platform.
+    #[cfg(not(target_os = "macos"))]
+    let _ = &tabbing_id;
+
+    builder.build().map_err(|e| {
+        let msg = e.to_string();
+        log_panel(&format!("error: builder.build() failed: {}", msg));
+        msg
+    })?;
+    log_panel("window built successfully");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -291,7 +411,9 @@ mod tests {
         }
         assert_eq!(
             result,
-            Some(std::path::PathBuf::from("/tmp/test-clarity-data/projects.json")),
+            Some(std::path::PathBuf::from(
+                "/tmp/test-clarity-data/projects.json"
+            )),
         );
     }
 
@@ -383,7 +505,10 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![refresh_recent_menu])
+        .invoke_handler(tauri::generate_handler![
+            refresh_recent_menu,
+            open_panel_window,
+        ])
         .manage(SidecarState(Mutex::new(None)))
         .setup(|app| {
             build_menu(app.handle())?;
