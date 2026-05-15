@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from datetime import UTC
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1386,12 +1387,13 @@ class TestClientChatBackendCompaction:
     def test_no_fire_when_under_threshold(self, tmp_path: Any) -> None:
         # Small transcript, small input_tokens → no compaction.
         # The wrapped client should never be asked to summarize.
+        from datetime import datetime
+
         from clarity_agent.transcript import Transcript, UserTurn
-        from datetime import datetime, timezone
 
         transcript = Transcript(tmp_path)
         transcript.write(UserTurn(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             content="tiny",
         ))
         backend = self._make_backend(tmp_path, transcript=transcript)
@@ -1408,19 +1410,20 @@ class TestClientChatBackendCompaction:
         # input_tokens > 85% of 128K window (the test-model context).
         # Compaction writes a CompactionSummary into a new chapter,
         # produced by our stubbed create_message → "summary text".
+        from datetime import datetime
+
         from clarity_agent.transcript import (
             CompactionSummary,
             Transcript,
             UserTurn,
         )
-        from datetime import datetime, timezone
 
         transcript = Transcript(tmp_path)
         # Seed the chapter with enough turns that the 70/30 split
         # has something to summarize.
         for i in range(10):
             transcript.write(UserTurn(
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 content=f"turn {i}",
             ))
         backend = self._make_backend(tmp_path, transcript=transcript)
@@ -1445,16 +1448,17 @@ class TestClientChatBackendCompaction:
         # threshold even though live input_tokens stays small.  At
         # 85% of 128K → 108,800 tokens → ~435,200 chars by the
         # estimator (4 chars per token).
+        from datetime import datetime
+
         from clarity_agent.transcript import (
             CompactionSummary,
             Transcript,
             UserTurn,
         )
-        from datetime import datetime, timezone
 
         transcript = Transcript(tmp_path)
         transcript.write(UserTurn(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             content="x" * 450_000,
         ))
         backend = self._make_backend(tmp_path, transcript=transcript)
@@ -1472,14 +1476,15 @@ class TestClientChatBackendCompaction:
         # on_compaction_complete fires after with the summary +
         # source turn count.  The adapter relies on this ordering
         # to drive its status / banner UI.
+        from datetime import datetime
+
         from clarity_agent.llm.types import CompactionInfo
         from clarity_agent.transcript import Transcript, UserTurn
-        from datetime import datetime, timezone
 
         transcript = Transcript(tmp_path)
         for i in range(5):
             transcript.write(UserTurn(
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 content=f"turn {i}",
             ))
         backend = self._make_backend(tmp_path, transcript=transcript)

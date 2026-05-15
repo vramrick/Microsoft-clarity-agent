@@ -16,7 +16,6 @@ trigger auto-compaction.
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,10 +30,12 @@ def _import_copilot_backend():
     present in every test env.
     """
     try:
-        from clarity_agent.llm.impl.github_copilot import CopilotChatBackend
         from copilot.generated.session_events import (
-            SessionEvent, SessionEventType,
+            SessionEvent,
+            SessionEventType,
         )
+
+        from clarity_agent.llm.impl.github_copilot import CopilotChatBackend
         return CopilotChatBackend, SessionEvent, SessionEventType
     except ImportError:
         pytest.skip("copilot SDK not installed")

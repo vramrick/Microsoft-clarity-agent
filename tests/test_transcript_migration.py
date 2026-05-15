@@ -21,7 +21,6 @@ from clarity_agent.transcript import (
     ModelOverride,
     ProcessStarted,
     SessionResume,
-    ToolUseText,
     Transcript,
     UserTurn,
     migrate_legacy_transcripts,
@@ -81,7 +80,7 @@ class TestNoOp:
         assert Transcript(project).is_empty
 
     def test_returns_false_when_no_legacy_files(self, project):
-        d = _transcripts_dir(project)
+        _transcripts_dir(project)
         # An empty transcripts/ directory (nothing to migrate).
         assert migrate_legacy_transcripts(project) is False
 

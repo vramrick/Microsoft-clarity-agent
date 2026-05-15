@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -195,7 +195,7 @@ class WebSessionAdapter:
         )
         new_chapter = self._project_transcript.start_new_chapter()
         self._project_transcript.write(ChapterStarted(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             project_dir=str(self.project_dir),
             backend=backend_name,
         ))

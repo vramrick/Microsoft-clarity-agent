@@ -45,9 +45,9 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -459,7 +459,7 @@ class Transcript:
         self,
         *,
         threshold_tokens: int,
-        summarize_fn: Callable[[list[Event]], str],
+        summarize_fn: Callable[[Sequence[Event]], str],
         input_tokens: int = 0,
         summarize_fraction: float = 0.70,
     ) -> CompactionResult | None:
@@ -540,7 +540,7 @@ class Transcript:
             new_chapter=self.current_chapter or 0,
         )
 
-    def _select_events_to_summarize(self, summarize_fraction: float) -> list[Event]:
+    def _select_events_to_summarize(self, summarize_fraction: float) -> Sequence[Event]:
         """The older portion of message events that would be folded
         into a summary at the given split fraction.
 
@@ -550,10 +550,12 @@ class Transcript:
         """
         from clarity_agent.transcript.events import (
             ChapterStarted,
-            CompactionSummary as _CSEvent,
             ModelOverride,
             ProcessStarted,
             SessionResume,
+        )
+        from clarity_agent.transcript.events import (
+            CompactionSummary as _CSEvent,
         )
         metadata_types = (
             ChapterStarted, SessionResume, _CSEvent,
@@ -683,7 +685,7 @@ class Transcript:
 
         new_chapter = self.start_new_chapter()
         self.write(CompactionSummary(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             summary=summary,
             source_chapter=source_chapter,
             source_turn_count=source_turn_count,
@@ -819,6 +821,11 @@ class Transcript:
         # Imported lazily to keep the optional chat-rendering path
         # from forcing the LLM-client dependency into every
         # Transcript caller.
+        # ``uuid4`` ids match what the frontend generates for live
+        # messages, so the union of "loaded history" + "new live
+        # messages" has uniform shape.
+        import uuid as _uuid
+
         from clarity_agent.llm.client import extract_tool_detail
         from clarity_agent.transcript.events import (
             AssistantText,
@@ -826,11 +833,6 @@ class Transcript:
             ToolUseText,
             UserTurn,
         )
-
-        # ``uuid4`` ids match what the frontend generates for live
-        # messages, so the union of "loaded history" + "new live
-        # messages" has uniform shape.
-        import uuid as _uuid
 
         messages: list[dict[str, Any]] = []
         pending_tools: list[dict[str, str]] = []
@@ -913,7 +915,7 @@ class Transcript:
     # Context-manager support
     # ------------------------------------------------------------------
 
-    def __enter__(self) -> "Transcript":
+    def __enter__(self) -> Transcript:
         return self
 
     def __exit__(

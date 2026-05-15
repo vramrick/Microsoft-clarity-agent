@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -53,7 +53,7 @@ from clarity_agent.transcript import (
 
 def _now() -> datetime:
     """Wall-clock timestamp for transcript events, with timezone."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _git_username(project_dir: Path) -> str | None:

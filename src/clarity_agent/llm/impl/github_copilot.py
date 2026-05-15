@@ -20,7 +20,7 @@ import threading
 import time
 from collections.abc import Coroutine
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # Deferred behind ``TYPE_CHECKING`` to break the cycle through
 # ``clarity_agent.transcript._render`` → ``clarity_agent.llm.client``;
@@ -169,7 +169,7 @@ class CopilotChatBackend(ChatBackend):
         token: str | None = None,
         idle_timeout_seconds: float | None = None,
         max_rpc_retries: int | None = None,
-        transcript: "Transcript | None" = None,
+        transcript: Transcript | None = None,
     ) -> None:
         super().__init__(transcript=transcript)
         self.project_dir = project_dir

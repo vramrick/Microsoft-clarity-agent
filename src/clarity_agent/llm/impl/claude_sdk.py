@@ -14,7 +14,7 @@ import os
 import re
 from pathlib import Path
 from types import ModuleType
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from clarity_agent.llm.chat import ChatBackend
 
@@ -117,7 +117,7 @@ class SdkChatBackend(ChatBackend):
         *,
         project_dir: Path,
         clarity_agent_dir: Path,
-        transcript: "Transcript | None" = None,
+        transcript: Transcript | None = None,
     ) -> None:
         try:
             import claude_agent_sdk

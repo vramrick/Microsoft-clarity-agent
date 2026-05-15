@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from clarity_agent.transcript.events import (
@@ -124,7 +124,7 @@ def migrate_legacy_transcripts(project_dir: Path) -> bool:
     sorted_files = _sort_legacy_files(legacy_files)
     for i, (path, header_date, backend) in enumerate(sorted_files):
         timestamp = header_date or datetime.fromtimestamp(
-            path.stat().st_mtime, tz=timezone.utc,
+            path.stat().st_mtime, tz=UTC,
         )
         backend_name = backend or "unknown"
         if i == 0:
@@ -258,7 +258,7 @@ def _parse_iso(raw: str) -> datetime | None:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 

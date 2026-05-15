@@ -20,7 +20,7 @@ import importlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # Deferred behind ``TYPE_CHECKING`` to avoid the circular import
 # documented in ``clarity_agent.llm.chat`` — same reason applies here

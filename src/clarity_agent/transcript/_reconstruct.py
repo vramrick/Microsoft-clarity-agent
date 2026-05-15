@@ -42,6 +42,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from clarity_agent.transcript._render import render_event
 from clarity_agent.transcript.events import (
     AssistantText,
     CompactionSummary,
@@ -51,7 +52,6 @@ from clarity_agent.transcript.events import (
     ToolUseText,
     UserTurn,
 )
-from clarity_agent.transcript._render import render_event
 
 # Character budget for the SDK-path context summary.  Matches the
 # legacy ``_load_transcript_context`` cap in

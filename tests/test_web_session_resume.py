@@ -26,7 +26,7 @@ the tests off the network.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +40,7 @@ from clarity_agent.transcript import (
 )
 from clarity_agent.web.session_manager import WebSessionAdapter
 
-
-T0 = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
 
 
 class _StubBackend(ChatBackend):
@@ -265,14 +264,15 @@ class TestStartNewChapter:
         # buffered context must be discarded — injecting it into
         # the brand-new chapter's first message would defeat the
         # whole purpose of starting fresh.
+        from datetime import datetime
+
         from clarity_agent.transcript import Transcript, UserTurn
-        from datetime import datetime, timezone
 
         # Seed the transcript with prior content so start() loads
         # a context blob.
         t = Transcript(project)
         t.write(UserTurn(
-            timestamp=datetime.now(tz=timezone.utc), content="prior turn",
+            timestamp=datetime.now(tz=UTC), content="prior turn",
         ))
         t.close()
 
@@ -286,13 +286,14 @@ class TestStartNewChapter:
         # The old chapter doesn't get deleted — it's archived,
         # browsable via History.  Verify chapter 1 still exists
         # after rolling over to chapter 2.
+        from datetime import datetime
+
         from clarity_agent.transcript import Transcript, UserTurn
-        from datetime import datetime, timezone
 
         adapter = _start_adapter(project)
         # Add a recognizable event to chapter 1.
         adapter._project_transcript.write(UserTurn(
-            timestamp=datetime.now(tz=timezone.utc), content="in chapter 1",
+            timestamp=datetime.now(tz=UTC), content="in chapter 1",
         ))
 
         adapter.start_new_chapter()

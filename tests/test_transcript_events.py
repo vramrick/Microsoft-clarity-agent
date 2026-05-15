@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -23,9 +23,8 @@ from clarity_agent.transcript.events import (
     serialize_event,
 )
 
-
 # A fixed timestamp keeps snapshot assertions stable across CI runs.
-T0 = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
 
 
 def _round_trip(event):

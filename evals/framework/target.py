@@ -117,7 +117,7 @@ class TargetSession:
         ``None`` when no transcript was provided (``--no-transcript``)
         or when the transcript still has no chapters (no writes yet).
         """
-        if self._transcript is None or self._transcript.is_empty:
+        if self._transcript is None or self._transcript.is_empty or self._transcript.current_chapter is None:
             return None
         return self._transcript.chapter_md_path(self._transcript.current_chapter)
 

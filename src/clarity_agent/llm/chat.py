@@ -21,10 +21,10 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import TracebackType
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, ClassVar
 
 # ``Transcript`` import is deferred behind ``TYPE_CHECKING`` to break
 # a real circular dependency: ``clarity_agent.transcript._render``
@@ -35,15 +35,15 @@ from typing import Any, ClassVar, TYPE_CHECKING
 # annotation into a string at runtime, so the symbol is only needed
 # for type checkers.
 if TYPE_CHECKING:
-    from clarity_agent.transcript import Transcript
+    from clarity_agent.transcript import Event, Transcript
 
 from clarity_agent.llm.types import (
+    CompactionCallback,
     CostCallback,
     LLMResponse,
     StatusCallback,
-    TextDeltaCallback,
-    CompactionCallback,
     StructuredToolCallback,
+    TextDeltaCallback,
     ToolCallback,
     ToolHandler,
     ToolUseBlock,
@@ -628,7 +628,7 @@ class ClientChatBackend(ChatBackend):
                 source_turn_count=result.source_turn_count,
             ))
 
-    def _summarize_via_create_message(self, events: list[Any]) -> str:
+    def _summarize_via_create_message(self, events: Sequence[Event]) -> str:
         """Summarize an event list via the wrapped client's low-level API.
 
         Bypasses :meth:`chat` deliberately: that path writes to the
@@ -653,7 +653,7 @@ class ClientChatBackend(ChatBackend):
         self._client.on_usage = None
         try:
             def _call(prompt: str) -> str:
-                response: LLMResponse = self._loop.run_until_complete(
+                response: LLMResponse = self._loop.run_until_complete(  # pyright: ignore
                     self._client.create_message(
                         messages=[{"role": "user", "content": prompt}],
                         model=self.resolve_model(None),

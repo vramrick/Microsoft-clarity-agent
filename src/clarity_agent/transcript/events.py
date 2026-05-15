@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
 
@@ -248,18 +248,7 @@ class ModelOverride(_BaseEvent):
 # (1) define the class with a ``type: Literal["new_type"]`` field,
 # (2) append it here, (3) extend the markdown renderer to handle it.
 Event = Annotated[
-    Union[
-        ChapterStarted,
-        CompactionSummary,
-        SessionResume,
-        UserTurn,
-        AssistantText,
-        ToolUse,
-        ToolResult,
-        ToolUseText,
-        ProcessStarted,
-        ModelOverride,
-    ],
+    ChapterStarted | CompactionSummary | SessionResume | UserTurn | AssistantText | ToolUse | ToolResult | ToolUseText | ProcessStarted | ModelOverride,
     Field(discriminator="type"),
 ]
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -38,8 +38,7 @@ from clarity_agent.transcript import (
     parse_event,
 )
 
-
-T0 = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
 
 
 def _t(offset_minutes: int = 0) -> datetime:

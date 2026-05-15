@@ -24,7 +24,6 @@ is to catch regressions in the seams between components, especially:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +32,6 @@ import pytest
 from clarity_agent.llm.chat import ChatBackend
 from clarity_agent.llm.types import ToolUseBlock
 from clarity_agent.transcript import (
-    AssistantText,
     ChapterStarted,
     SessionResume,
     ToolUse,
@@ -42,7 +40,6 @@ from clarity_agent.transcript import (
 )
 from clarity_agent.web.session_manager import WebSessionAdapter
 from clarity_agent.web.session_state import load_session_state
-
 
 # ---------------------------------------------------------------------------
 # Test stubs
