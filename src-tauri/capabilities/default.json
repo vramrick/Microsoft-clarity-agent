@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capabilities for the Clarity app",
-  "windows": ["main"],
+  "windows": ["main", "panel-*"],
   "remote": {
     "urls": ["http://localhost:*", "http://127.0.0.1:*"]
   },
@@ -17,6 +17,7 @@
     {
       "identifier": "fs:scope",
       "allow": [{ "path": "**" }]
-    }
+    },
+    "allow-open-panel-window"
   ]
 }

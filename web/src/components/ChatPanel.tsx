@@ -310,6 +310,25 @@ export default function ChatPanel() {
           // Only disable when fully disconnected — typing while
           // streaming is fine, messages are queued and sent in turn.
           disabled={!connected}
+          // Identify this chat panel so its draft text survives
+          // mount/unmount (e.g., navigating to documents and
+          // back).  ``project_id`` is preferred when the backend
+          // provides it (a stable canonical identifier);
+          // ``project_dir`` is the path-based fallback that's
+          // always present.  Both names live on ``SessionInfo``;
+          // pass null until ``getSession()`` resolves so the input
+          // stays ephemeral during the brief loading window
+          // instead of binding to a placeholder id.
+          panelId={
+            sessionInfo && sessionInfo.session_id
+              ? {
+                  projectId:
+                    sessionInfo.project_id ?? sessionInfo.project_dir,
+                  type: "chat",
+                  sessionId: sessionInfo.session_id,
+                }
+              : null
+          }
           placeholder={
             !connected
               ? "Connecting..."
