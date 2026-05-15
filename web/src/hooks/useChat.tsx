@@ -308,7 +308,6 @@ export interface UseChatReturn {
   startProcess: (name: string) => void;
   stopGeneration: () => void;
   setModelOverride: (tier: string) => void;
-  newSession: () => void;
   dismissError: () => void;
 }
 
@@ -355,9 +354,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         break;
       case "model_changed":
         dispatch({ type: "model_changed", tier: msg.tier, model: msg.model, auto: msg.auto });
-        break;
-      case "session_started":
-        dispatch({ type: "clear" });
         break;
       case "warning":
         dispatch({ type: "warning_event", message: msg.message });
@@ -433,10 +429,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     send({ type: "stop" } as WsClientMessage);
   }, [send]);
 
-  const newSession = useCallback(() => {
-    send({ type: "new_session" } as WsClientMessage);
-  }, [send]);
-
   const dismissError = useCallback(() => {
     dispatch({ type: "dismiss_error" });
   }, []);
@@ -462,7 +454,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     startProcess,
     stopGeneration,
     setModelOverride,
-    newSession,
     dismissError,
   };
 

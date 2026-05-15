@@ -205,29 +205,19 @@ def create_app(
                 "hint": "Complete the setup wizard to configure an LLM provider.",
                 "retryable": False,
             })
-            # Keep the connection open so re-connect after setup works.
+            # Reject everything until setup completes.  The frontend
+            # finishes setup with ``window.location.reload()``, which
+            # drops this socket; the next connection re-evaluates
+            # provider config from scratch.
             try:
                 while True:
-                    data = await ws.receive_json()
-                    if data.get("type") == "new_session":
-                        # After setup, the config will have been reloaded.
-                        current_config = state["llm_config"]
-                        if current_config.provider != "none":
-                            break
-                        await ws.send_json({
-                            "type": "error",
-                            "message": "No LLM provider configured.",
-                            "category": "setup_required",
-                            "hint": "Complete the setup wizard to configure an LLM provider.",
-                            "retryable": False,
-                        })
-                    else:
-                        await ws.send_json({
-                            "type": "error",
-                            "message": "No LLM provider configured. Complete setup first.",
-                            "category": "setup_required",
-                            "retryable": False,
-                        })
+                    await ws.receive_json()
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "No LLM provider configured. Complete setup first.",
+                        "category": "setup_required",
+                        "retryable": False,
+                    })
             except WebSocketDisconnect:
                 return
 
@@ -334,16 +324,6 @@ def create_app(
                         "model": session.active_model,
                         "auto": session.model_override is None,
                     })
-
-                elif msg_type == "new_session":
-                    await session.stop()
-                    current_config = state["llm_config"]
-                    session = WebSessionAdapter(
-                        project_dir, clarity_agent_dir, current_config,
-                    )
-                    await session.start()
-                    state["session"] = session
-                    await ws.send_json({"type": "session_started"})
 
                 else:
                     await ws.send_json({

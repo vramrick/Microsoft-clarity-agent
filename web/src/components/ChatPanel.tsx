@@ -32,7 +32,6 @@ export default function ChatPanel() {
     sendMessage,
     startProcess,
     stopGeneration,
-    newSession,
     dismissError,
   } = useChat();
 
@@ -124,20 +123,6 @@ export default function ChatPanel() {
               {sessionCost > 0 && <>{" \u00b7 "}${sessionCost.toFixed(4)}</>}
             </span>
           )}
-          <button
-            onClick={() => {
-              autoStarted.current = false;
-              newSession();
-            }}
-            disabled={streaming}
-            aria-label="Start a new session"
-            className="text-xs px-3.5 py-1.5 border border-border-strong rounded-lg
-              text-body-label hover:bg-surface-dim hover:border-accent/30
-              disabled:opacity-40 disabled:cursor-not-allowed
-              transition-all duration-200"
-          >
-            New Session
-          </button>
         </div>
       </div>
 

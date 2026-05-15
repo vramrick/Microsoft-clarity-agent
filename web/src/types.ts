@@ -3,7 +3,6 @@ export type WsClientMessage =
   | { type: "chat"; message: string }
   | { type: "start_process"; process: string }
   | { type: "set_model_override"; tier: string }
-  | { type: "new_session" }
   | { type: "stop" };
 
 // WebSocket messages: server → client
@@ -14,7 +13,6 @@ export type WsServerMessage =
   | { type: "usage"; input_tokens: number; output_tokens: number }
   | { type: "response"; content: string }
   | { type: "model_changed"; tier: string; model: string; auto: boolean }
-  | { type: "session_started" }
   | { type: "error"; message: string; category?: string; hint?: string; retryable?: boolean }
   | { type: "warning"; message: string }
   | { type: "status"; phase: string };
