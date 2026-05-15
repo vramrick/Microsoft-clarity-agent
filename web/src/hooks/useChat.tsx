@@ -7,7 +7,11 @@ import {
   useRef,
 } from "react";
 import type { ChatMessage, ProcessMeta, ToolEvent, WsClientMessage, WsServerMessage } from "../types";
-import { getProcesses, startNewChapter as apiStartNewChapter } from "../api/client";
+import {
+  getCurrentChapter,
+  getProcesses,
+  startNewChapter as apiStartNewChapter,
+} from "../api/client";
 import { useWebSocket } from "./useWebSocket";
 
 // ---------------------------------------------------------------------------
@@ -46,6 +50,13 @@ export interface ChatState {
    *  "tool:read_file").  Displayed transiently, not in chat history.
    *  Cleared on response/error. */
   statusPhase: string | null;
+  /** True once the initial fetch of the current chapter's history
+   *  has resolved (either with prior turns or with an empty list).
+   *  Gates the auto-start effect in ChatPanel so it doesn't fire
+   *  before we know whether prior conversation exists — otherwise
+   *  every page open would re-trigger the slow clarity-agent
+   *  kickoff even on projects that should just resume. */
+  historyLoaded: boolean;
 }
 
 export type ChatAction =
@@ -64,7 +75,12 @@ export type ChatAction =
   | { type: "warning_event"; message: string }
   | { type: "status_event"; phase: string }
   | { type: "dismiss_error" }
-  | { type: "clear" };
+  | { type: "clear" }
+  /** Populate the message list from the current chapter's prior
+   *  turns.  Dispatched once at mount after ``getCurrentChapter``
+   *  resolves; also flips ``historyLoaded`` so the auto-start
+   *  effect can run. */
+  | { type: "load_history"; messages: ChatMessage[] };
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
@@ -256,6 +272,25 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         autoModel: state.autoModel,
         error: null,
         statusPhase: null,
+        // ``clear`` is used by both "Start new chapter" (where we
+        // genuinely want a fresh slate) and the streaming reset
+        // paths.  In either case the history-loaded state is
+        // preserved — we've already done the initial fetch on mount,
+        // and re-fetching after a chapter rollover would just return
+        // the new chapter's empty event stream anyway.
+        historyLoaded: state.historyLoaded,
+      };
+
+    case "load_history":
+      // Replace the message list outright.  Called once at mount;
+      // ``historyLoaded`` flips true regardless of whether the
+      // payload was empty (empty history is a meaningful "fresh
+      // project, no prior turns" signal — the auto-start effect
+      // needs to fire in that case).
+      return {
+        ...state,
+        messages: action.messages,
+        historyLoaded: true,
       };
 
     default:
@@ -279,6 +314,7 @@ export const initialState: ChatState = {
   autoModel: true,
   error: null,
   statusPhase: null,
+  historyLoaded: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -304,6 +340,11 @@ export interface UseChatReturn {
   error: ErrorInfo | null;
   /** Ephemeral backend status phase (e.g. "reasoning", "tool:read_file"). */
   statusPhase: string | null;
+  /** True once the chat panel's initial fetch of prior conversation
+   *  has resolved.  Consumers gate auto-actions (process kickoff)
+   *  on this so they don't fire before knowing whether history
+   *  exists. */
+  historyLoaded: boolean;
   sendMessage: (text: string) => void;
   startProcess: (name: string) => void;
   stopGeneration: () => void;
@@ -335,6 +376,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         processMetaRef.current = map;
       })
       .catch(() => {});
+  }, []);
+
+  // Fetch the current chapter's prior turns at mount so the chat
+  // panel shows continuity instead of jumping into the slow
+  // clarity-agent kickoff every time.  On failure (or no active
+  // session yet, which returns an empty list) we still mark
+  // history as loaded — the auto-start effect needs to fire on
+  // fresh projects too, and that signal is "history is loaded
+  // *and* empty."
+  useEffect(() => {
+    getCurrentChapter()
+      .then((r) => dispatch({ type: "load_history", messages: r.messages }))
+      .catch(() => dispatch({ type: "load_history", messages: [] }));
   }, []);
 
   // Dispatch directly from the WebSocket event handler so no messages
@@ -464,6 +518,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     autoModel: state.autoModel,
     error: state.error,
     statusPhase: state.statusPhase,
+    historyLoaded: state.historyLoaded,
     sendMessage,
     startProcess,
     stopGeneration,

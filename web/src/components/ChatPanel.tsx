@@ -29,6 +29,7 @@ export default function ChatPanel() {
     connected,
     error,
     statusPhase,
+    historyLoaded,
     sendMessage,
     startProcess,
     stopGeneration,
@@ -56,16 +57,27 @@ export default function ChatPanel() {
     getSession().then(setSessionInfo).catch(() => {});
   }, []);
 
-  // Auto-start the clarity-agent process on first connection (only if protocol exists)
+  // Auto-start the clarity-agent process — but only when this is
+  // genuinely a fresh start.  The ``historyLoaded`` guard is the
+  // key new piece: if the user has prior conversation in the
+  // current chapter, the load_history fetch will populate
+  // ``messages`` and the ``messages.length === 0`` check below
+  // becomes false, so we skip the slow kickoff and let them resume.
+  // Without ``historyLoaded`` we'd race the fetch and fire the
+  // kickoff on every page open.
   useEffect(() => {
-    if (connected && !autoStarted.current && messages.length === 0 && !streaming) {
-      if (protocolExists !== false) {
-        // Protocol exists or unknown — auto-start as before
-        autoStarted.current = true;
-        startProcess("clarity-agent");
-      }
+    if (
+      historyLoaded
+      && connected
+      && !autoStarted.current
+      && messages.length === 0
+      && !streaming
+      && protocolExists !== false
+    ) {
+      autoStarted.current = true;
+      startProcess("clarity-agent");
     }
-  }, [connected, messages.length, streaming, startProcess, protocolExists]);
+  }, [historyLoaded, connected, messages.length, streaming, startProcess, protocolExists]);
 
   // Track whether the user is scrolled to the bottom. Only auto-scroll
   // when they're "stuck" to the bottom — if they've scrolled up to read

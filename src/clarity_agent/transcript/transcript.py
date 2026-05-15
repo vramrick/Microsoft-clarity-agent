@@ -505,6 +505,131 @@ class Transcript:
         """
         return build_anthropic_messages(self.current_events())
 
+    def chat_messages(self) -> list[dict[str, Any]]:
+        """Render the current chapter as chat-message dicts for the UI.
+
+        Shape matches the frontend's ``ChatMessage`` interface so the
+        web UI can directly populate its message list at mount,
+        giving the user immediate continuity with their prior
+        conversation rather than the empty-chat false-start the
+        legacy auto-flow produced.
+
+        Grouping rules:
+        * Each :class:`UserTurn` becomes a ``{role: "user", ...}`` entry.
+        * :class:`ToolUse` / :class:`ToolUseText` events accumulate
+          into a ``toolEvents`` list that attaches to the *next*
+          :class:`AssistantText` — matching the legacy ordering
+          (User → tools → Assistant in the same turn).
+        * Trailing tools without a paired assistant text (rare —
+          would mean an assistant turn that ended with only tool
+          calls) are emitted as an assistant message with empty
+          content and the tools attached, so they aren't silently
+          dropped.
+        * Metadata events (:class:`ChapterStarted`, :class:`SessionResume`,
+          :class:`ProcessStarted`, :class:`ModelOverride`,
+          :class:`CompactionSummary`) are skipped — they aren't user-visible
+          chat turns.
+        * :class:`ToolResult` events are skipped too — the SDK backend
+          handles tool results internally and they don't render as
+          separate chat messages today.
+
+        Returns an empty list when the current chapter has no
+        message-producing events (fresh chapter, or one that only
+        contains a header so far).
+        """
+        # Imported lazily to keep the optional chat-rendering path
+        # from forcing the LLM-client dependency into every
+        # Transcript caller.
+        from clarity_agent.llm.client import extract_tool_detail
+        from clarity_agent.transcript.events import (
+            AssistantText,
+            ToolUse,
+            ToolUseText,
+            UserTurn,
+        )
+
+        # ``uuid4`` ids match what the frontend generates for live
+        # messages, so the union of "loaded history" + "new live
+        # messages" has uniform shape.
+        import uuid as _uuid
+
+        messages: list[dict[str, Any]] = []
+        pending_tools: list[dict[str, str]] = []
+
+        # Track the most recent timestamp we've seen so unanchored
+        # trailing tools (rare flush path) inherit a sensible time.
+        last_ts_ms: int | None = None
+
+        def _ts_ms(dt: datetime) -> int:
+            """Event timestamp → JS-style milliseconds since epoch.
+
+            The frontend's ``ChatMessage.timestamp`` is a JS number
+            (ms).  Pydantic gives us a Python ``datetime``; convert.
+            """
+            return int(dt.timestamp() * 1000)
+
+        def flush_tools_only() -> None:
+            """Emit pending tools as an empty assistant message.
+
+            Rare path: tools accumulated but no assistant text
+            arrived to anchor them.  Could happen on a turn that
+            ended in only tool calls, or on a transcript that was
+            interrupted mid-turn.  Either way, don't drop them.
+            """
+            if pending_tools:
+                messages.append({
+                    "id": _uuid.uuid4().hex,
+                    "role": "assistant",
+                    "content": "",
+                    "toolEvents": list(pending_tools),
+                    "timestamp": last_ts_ms or 0,
+                })
+                pending_tools.clear()
+
+        for event in self.current_events():
+            if isinstance(event, UserTurn):
+                # New user turn closes any unanchored tool sequence.
+                flush_tools_only()
+                last_ts_ms = _ts_ms(event.timestamp)
+                messages.append({
+                    "id": _uuid.uuid4().hex,
+                    "role": "user",
+                    "content": event.content,
+                    "timestamp": last_ts_ms,
+                })
+            elif isinstance(event, ToolUse):
+                last_ts_ms = _ts_ms(event.timestamp)
+                pending_tools.append({
+                    "tool": event.name,
+                    "detail": extract_tool_detail(event.name, event.input),
+                })
+            elif isinstance(event, ToolUseText):
+                # Legacy migrated tool entries already have a flat
+                # ``detail`` string — render verbatim.
+                last_ts_ms = _ts_ms(event.timestamp)
+                pending_tools.append({
+                    "tool": event.name,
+                    "detail": event.detail,
+                })
+            elif isinstance(event, AssistantText):
+                last_ts_ms = _ts_ms(event.timestamp)
+                msg: dict[str, Any] = {
+                    "id": _uuid.uuid4().hex,
+                    "role": "assistant",
+                    "content": event.content,
+                    "timestamp": last_ts_ms,
+                }
+                if pending_tools:
+                    msg["toolEvents"] = list(pending_tools)
+                    pending_tools.clear()
+                messages.append(msg)
+            # Metadata events fall through silently — they don't
+            # belong in the chat view.
+
+        # End of stream: drain trailing tools (if any).
+        flush_tools_only()
+        return messages
+
     # ------------------------------------------------------------------
     # Context-manager support
     # ------------------------------------------------------------------

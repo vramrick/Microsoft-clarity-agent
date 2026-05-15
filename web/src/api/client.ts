@@ -1,6 +1,7 @@
 import type {
   ActiveProject,
   AppSettings,
+  ChatMessage,
   ConfigureResult,
   FeedbackPayload,
   FeedbackResult,
@@ -77,6 +78,15 @@ export const getSession = () => fetchJson<SessionInfo>("/api/session");
  */
 export const startNewChapter = () =>
   fetchJson<{ chapter: number }>("/api/thread/new-chapter", { method: "POST" });
+
+/**
+ * Fetch the current chapter's prior turns as chat messages.
+ * Used at mount to populate the chat panel with continuity from
+ * the user's earlier conversation; the empty-list response means
+ * "fresh project or fresh chapter, nothing prior to show."
+ */
+export const getCurrentChapter = () =>
+  fetchJson<{ messages: ChatMessage[] }>("/api/thread/current-chapter");
 
 // Update check
 export const checkForUpdate = () => fetchJson<UpdateCheckInfo>("/api/update-check");

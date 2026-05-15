@@ -668,3 +668,158 @@ class TestAnthropicMessages:
         assert blocks[1]["name"] == "Bash"
         assert blocks[1]["id"].startswith("legacy_")
         assert blocks[1]["input"] == {"detail": "ls -la"}
+
+
+class TestChatMessages:
+    """``Transcript.chat_messages()`` renders the current chapter as
+    chat-message dicts for the frontend's message list.  This is
+    what gives the user immediate continuity when they reopen a
+    project — rather than the empty-chat false-start that would
+    cause the auto-flow to re-fire the slow clarity-agent kickoff."""
+
+    def test_returns_empty_for_empty_transcript(self, project):
+        assert Transcript(project).chat_messages() == []
+
+    def test_returns_empty_for_chapter_with_only_header(self, project):
+        # A chapter with just a ``ChapterStarted`` event has no
+        # user-visible turns; the result is empty.  This is the
+        # "fresh project, hasn't chatted yet" case.
+        t = Transcript(project)
+        t.write(ChapterStarted(
+            timestamp=T0, project_dir=str(project), backend="X",
+        ))
+        t.close()
+        assert t.chat_messages() == []
+
+    def test_user_turn_emits_user_message(self, project):
+        t = Transcript(project)
+        t.write(UserTurn(timestamp=T0, content="hello"))
+        t.close()
+        msgs = t.chat_messages()
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "user"
+        assert msgs[0]["content"] == "hello"
+        # Every message has a unique id (matching live-message shape).
+        assert msgs[0]["id"]
+
+    def test_assistant_text_emits_assistant_message(self, project):
+        t = Transcript(project)
+        t.write(UserTurn(timestamp=T0, content="q"))
+        t.write(AssistantText(timestamp=_t(1), content="a"))
+        t.close()
+        msgs = t.chat_messages()
+        # User turn carries the UserTurn event's timestamp (ms).
+        assert msgs[0]["role"] == "user"
+        assert msgs[0]["content"] == "q"
+        assert msgs[0]["timestamp"] == int(T0.timestamp() * 1000)
+        # Assistant message carries the AssistantText event's timestamp.
+        assert msgs[1]["role"] == "assistant"
+        assert msgs[1]["content"] == "a"
+        assert msgs[1]["timestamp"] == int(_t(1).timestamp() * 1000)
+
+    def test_tool_uses_attach_to_following_assistant(self, project):
+        # The legacy ordering puts tools between the user turn and
+        # the assistant text; chat_messages groups them onto the
+        # *next* assistant message via the ``toolEvents`` field, so
+        # the rendered UI matches the live-chat behavior.
+        t = Transcript(project)
+        t.write(UserTurn(timestamp=T0, content="read the file"))
+        t.write(ToolUse(
+            timestamp=_t(1), tool_use_id="t1",
+            name="Read", input={"file_path": "/x"},
+        ))
+        t.write(ToolUse(
+            timestamp=_t(2), tool_use_id="t2",
+            name="Bash", input={"command": "ls"},
+        ))
+        t.write(AssistantText(timestamp=_t(3), content="done"))
+        t.close()
+
+        msgs = t.chat_messages()
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "user"
+        # Assistant message carries both tool events.
+        assert msgs[1]["role"] == "assistant"
+        assert msgs[1]["content"] == "done"
+        assert len(msgs[1]["toolEvents"]) == 2
+        assert msgs[1]["toolEvents"][0]["tool"] == "Read"
+        assert msgs[1]["toolEvents"][1]["tool"] == "Bash"
+
+    def test_legacy_tool_use_text_renders_with_detail_verbatim(self, project):
+        # Migrated tool entries (no structured input) render with
+        # the flattened ``detail`` string they were captured with.
+        t = Transcript(project)
+        t.write(UserTurn(timestamp=T0, content="x"))
+        t.write(ToolUseText(timestamp=_t(1), name="Bash", detail="ls -la"))
+        t.write(AssistantText(timestamp=_t(2), content="ok"))
+        t.close()
+        msgs = t.chat_messages()
+        assert msgs[1]["toolEvents"] == [{"tool": "Bash", "detail": "ls -la"}]
+
+    def test_trailing_tools_without_assistant_emit_empty_assistant_message(self, project):
+        # Edge case: an assistant turn ended in tools with no final
+        # text (e.g., interrupted mid-turn).  Tools shouldn't be
+        # silently dropped — emit them on an empty-content
+        # assistant message so the user can see what the assistant
+        # was doing.
+        t = Transcript(project)
+        t.write(UserTurn(timestamp=T0, content="go"))
+        t.write(ToolUse(
+            timestamp=_t(1), tool_use_id="t1",
+            name="Read", input={"file_path": "/x"},
+        ))
+        t.close()
+        msgs = t.chat_messages()
+        assert len(msgs) == 2
+        assert msgs[1]["role"] == "assistant"
+        assert msgs[1]["content"] == ""
+        assert len(msgs[1]["toolEvents"]) == 1
+
+    def test_metadata_events_skipped(self, project):
+        # ChapterStarted / SessionResume / ProcessStarted /
+        # ModelOverride are bookkeeping — they don't render as chat
+        # messages.  Including them would confuse users about what
+        # they "said."
+        t = Transcript(project)
+        t.write(ChapterStarted(timestamp=T0, project_dir=str(project), backend="X"))
+        t.write(SessionResume(timestamp=_t(1), backend="X"))
+        t.write(ProcessStarted(timestamp=_t(2), process_name="clarity-agent"))
+        t.write(ModelOverride(timestamp=_t(3), tier="deep", model="opus"))
+        t.write(UserTurn(timestamp=_t(4), content="hi"))
+        t.write(AssistantText(timestamp=_t(5), content="hello"))
+        t.close()
+        msgs = t.chat_messages()
+        # Only the two real turns survive.
+        assert [m["role"] for m in msgs] == ["user", "assistant"]
+        assert msgs[0]["content"] == "hi"
+        assert msgs[1]["content"] == "hello"
+
+    def test_only_current_chapter_visible(self, project):
+        # Same invariant the rest of the system carries: a new
+        # chapter is meant to be a fresh start, so the UI on opening
+        # a project after rollover sees only the current chapter's
+        # turns (the prior chapter is archived but not surfaced).
+        t = Transcript(project)
+        t.write(UserTurn(timestamp=T0, content="in chapter 1"))
+        t.write(AssistantText(timestamp=_t(1), content="response 1"))
+        t.start_new_chapter()
+        t.write(UserTurn(timestamp=_t(10), content="in chapter 2"))
+        t.close()
+
+        msgs = t.chat_messages()
+        contents = [m["content"] for m in msgs]
+        assert "in chapter 2" in contents
+        assert "in chapter 1" not in contents
+        assert "response 1" not in contents
+
+    def test_message_ids_are_unique(self, project):
+        # Every message gets a fresh uuid id; the union of "loaded
+        # history" + "new live messages" must be uniformly unique.
+        t = Transcript(project)
+        for i in range(5):
+            t.write(UserTurn(timestamp=_t(i), content=f"u{i}"))
+            t.write(AssistantText(timestamp=_t(i), content=f"a{i}"))
+        t.close()
+        msgs = t.chat_messages()
+        ids = [m["id"] for m in msgs]
+        assert len(set(ids)) == len(ids)

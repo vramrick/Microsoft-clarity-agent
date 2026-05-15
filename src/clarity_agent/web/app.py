@@ -584,6 +584,23 @@ def create_app(
         chapter = s.start_new_chapter()
         return {"chapter": chapter}
 
+    @app.get("/api/thread/current-chapter")
+    async def current_chapter_messages() -> dict[str, Any]:
+        """Return the current chapter's prior turns as chat messages.
+
+        Used by the frontend at mount to populate the chat panel
+        with the user's prior conversation — so opening a project
+        immediately shows continuity rather than an empty chat that
+        would auto-fire the clarity-agent kickoff.
+
+        Returns ``{"messages": []}`` for fresh projects, projects
+        whose current chapter only contains a header, and projects
+        with no transcripts directory yet — none of those have
+        anything visible to surface.
+        """
+        from clarity_agent.transcript import Transcript
+        return {"messages": Transcript(project_dir).chat_messages()}
+
     # ------------------------------------------------------------------
     # REST: Session info
     # ------------------------------------------------------------------
