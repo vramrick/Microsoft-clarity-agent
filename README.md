@@ -17,6 +17,8 @@ Clarity runs as a desktop app, a web UI, or embedded in your coding agent. It pr
 
 Read more about the philosophy behind clarity agent [in this blog post](https://medium.com/@yonatanzunger/are-we-building-the-right-ai-203cfc7effdc).
 
+You can also join the [Clarity Agent Discord](https://aka.ms/clarity-agent-community) to talk with the team, share feedback, and connect with the community.
+
 ## Getting Started
 
 ### Install
@@ -176,10 +178,6 @@ Clarity was designed with the following principles in mind.
 
 **Tool-agnostic core.** Process guides are plain markdown that any LLM can follow. Swapping tools doesn't mean starting over.
 
-
-## Community
-
-Join the [Clarity Agent Discord](https://aka.ms/clarity-agent-community) to share feedback, ask questions, and connect with the team and other users.
 
 ## Contributing
 
