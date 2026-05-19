@@ -177,6 +177,10 @@ Clarity was designed with the following principles in mind.
 **Tool-agnostic core.** Process guides are plain markdown that any LLM can follow. Swapping tools doesn't mean starting over.
 
 
+## Community
+
+Join the [Clarity Agent Discord](https://aka.ms/clarity-agent-community) to share feedback, ask questions, and connect with the team and other users.
+
 ## Contributing
 
 Contributions are welcome, especially:
