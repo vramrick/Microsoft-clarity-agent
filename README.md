@@ -54,11 +54,11 @@ bash scripts/install.sh        # macOS / Linux
 
 ### Launch and connect an LLM
 
-**macOS:** Open `~/Applications/Clarity.app` (downloaded installer) or `Clarity.app` from wherever you installed it.
+**macOS:** Open `Clarity.app` from `~/Applications`.
 
 **Windows:** Run the installed app from the Start Menu, or run `clarity` from your terminal if you used the script installer.
 
-**Linux:** Run the `.AppImage` directly, or run `clarity` from your terminal if you used the script installer.
+**Linux:** Run `clarity` from your terminal.
 
 On first launch, the setup wizard walks you through connecting an LLM provider.
 
