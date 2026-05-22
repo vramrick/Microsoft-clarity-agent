@@ -25,7 +25,6 @@ from clarity_agent.setup.doctor import (
     run_all_checks,
 )
 
-
 # ---------------------------------------------------------------------------
 # Error classification — Claude per-tool definition rejection
 # ---------------------------------------------------------------------------
