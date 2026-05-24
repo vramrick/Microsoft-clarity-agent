@@ -351,10 +351,17 @@ class TestEnsureAgentsMd:
 # ---------------------------------------------------------------------------
 
 
+# Parametrize value for the EMBEDDED case: a literal path-prefix
+# string we expect to find at the start of ``processes_dir``.  The
+# USERSPACE case uses ``None`` as a sentinel meaning "instead of a
+# literal prefix, assert the rendered path is absolute" — needed
+# because absolute paths look different across platforms
+# (``/usr/...`` on POSIX, ``C:/Users/...`` on Windows) so a
+# ``startswith("/")`` check would falsely fail on Windows CI.
 @pytest.mark.parametrize(
     ("layout_factory", "expected_protocol", "expected_processes_prefix"),
     [
-        (_userspace_layout, "Clarity Protocol", "/"),    # absolute path
+        (_userspace_layout, "Clarity Protocol", None),    # absolute path
         (_embedded_layout, ".clarity-protocol", ".clarity-agent/"),  # relative
     ],
 )
@@ -362,14 +369,20 @@ def test_mode_drives_path_form_in_render(
     tmp_path: Path,
     layout_factory: object,
     expected_protocol: str,
-    expected_processes_prefix: str,
+    expected_processes_prefix: str | None,
 ) -> None:
     layout = layout_factory(tmp_path)  # type: ignore[operator]
     out = render_snippet(layout)
     meta = parse_meta(out)
     assert meta is not None
     assert meta["protocol_dir_name"] == expected_protocol
-    assert meta["processes_dir"].startswith(expected_processes_prefix)
+    if expected_processes_prefix is None:
+        # USERSPACE — absolute path expected, but the actual root
+        # form is platform-specific.  Use ``Path.is_absolute`` so
+        # the test passes on both POSIX and Windows runners.
+        assert Path(meta["processes_dir"]).is_absolute()
+    else:
+        assert meta["processes_dir"].startswith(expected_processes_prefix)
 
 
 # ---------------------------------------------------------------------------
