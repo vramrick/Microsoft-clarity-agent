@@ -133,31 +133,32 @@ export default function Layout() {
           await activateProjectById(result.entry.id);
           id = result.entry.id;
         } else {
-          // Menu-driven open hit a needs_setup / broken_install /
-          // embedded_install_required branch.  The native-menu
-          // path has no place to host the SetupPromptDialog (it
-          // lives inside ProjectSwitcher, not the routed app
-          // shell), so we surface a banner the user can act on
-          // instead of silently doing nothing.  This was the
-          // "no clear UI behavior" symptom when a perfectly fine-
-          // looking directory came back with broken_install or
-          // needs_setup.
-          const reason =
-            result.status === "needs_setup"
-              ? "directory needs setup — use \"New Project…\" in the picker"
-              : result.status === "broken_install"
-              ? `installation looks broken (${result.brokenness})`
-              : result.status === "embedded_install_required"
-              ? "needs an embedded install: " + result.command
-              : `couldn't open (${(result satisfies never as { status: string }).status})`;
-          setActivationError(`Couldn't open ${path}: ${reason}`);
+          // The directory needs a setup decision (needs_setup,
+          // broken_install) or an external action (embedded
+          // install).  Defer to ProjectSwitcher's existing setup
+          // dialog rather than rebuilding the prompt UI here:
+          // uncollapse the sidebar so ProjectSwitcher is mounted
+          // and the dialog overlay is visible, then dispatch a
+          // custom event on the next tick (so the re-render that
+          // mounts the listener completes first).  ProjectSwitcher
+          // calls its own ``handleCreateResult`` and the user gets
+          // the same userspace / embedded prompt they'd see from
+          // the in-app "Open Project" button.
+          setSidebarCollapsed(false);
+          setTimeout(() => {
+            window.dispatchEvent(
+              new CustomEvent("clarity-show-create-prompt", {
+                detail: { name, path, result },
+              }),
+            );
+          }, 0);
           return;
         }
       } catch (err) {
         // ``createProject`` throws on unknown 409 bodies and on
-        // other HTTP errors.  Surface the message and bail
-        // rather than guessing — silent failure was what got us
-        // here in the first place.
+        // other HTTP errors.  Surface the message and bail rather
+        // than guessing — silent failure was what got us here in
+        // the first place.
         setActivationError(
           err instanceof Error ? err.message : String(err),
         );
