@@ -141,7 +141,7 @@ export default function ProjectSwitcher({ currentProject }: ProjectSwitcherProps
     setActivating(project.name);
     setError(null);
     try {
-      await activateProject(project.name);
+      await activateProject(project.id);
       setOpen(false);
       refreshRecentMenu();
       navigate(`/p/${project.id}/`);
@@ -164,7 +164,7 @@ export default function ProjectSwitcher({ currentProject }: ProjectSwitcherProps
     setRemoving(project.name);
     setError(null);
     try {
-      await removeProject(project.name);
+      await removeProject(project.id);
       setConfirmRemove(null);
       refresh();
       void refreshRecentMenu();

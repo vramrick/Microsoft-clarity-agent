@@ -242,7 +242,7 @@ def create_launcher(
     # ``get_active`` reads the new ``active_id`` key with a legacy
     # fallback to the old name-keyed ``active`` field.
     _persisted_active_id = registry.get_active()
-    if _persisted_active_id and registry.get_by_id(_persisted_active_id) is not None:
+    if _persisted_active_id and registry.get(_persisted_active_id) is not None:
         active_project["id"] = _persisted_active_id
 
     from clarity_agent.app_paths import clarity_env_path
@@ -398,10 +398,10 @@ def create_launcher(
             processes.touch(project_id)
             return entry
         # Server not running — try to (re)start it.
-        project = registry.get_by_id(project_id)
+        project = registry.get(project_id)
         if project is None or not Path(project.path).is_dir():
             if project is not None:
-                registry.remove(project.name)
+                registry.remove(project.id)
             active_project["id"] = None
             registry.clear_active()
             return None
@@ -436,16 +436,20 @@ def create_launcher(
 
     @app.get("/api/projects")
     async def list_projects() -> dict[str, Any]:
+        # ``registry.list()`` drops entries whose directories no
+        # longer exist on disk and writes the cleaned registry
+        # back, so callers see a current view.  We still have to
+        # sync the launcher's in-memory ``active_project["id"]``
+        # if the pruning happened to drop the active one — the
+        # registry can't reach into runtime state.
         projects = registry.list()
-        # Prune projects whose directories no longer exist.
-        gone = [p for p in projects if not Path(p.path).is_dir()]
-        for p in gone:
-            registry.remove(p.name)
-            if p.id == active_project["id"]:
-                active_project["id"] = None
-                registry.clear_active()
-        if gone:
-            projects = [p for p in projects if Path(p.path).is_dir()]
+        live_ids = {p.id for p in projects}
+        if (
+            active_project["id"] is not None
+            and active_project["id"] not in live_ids
+        ):
+            active_project["id"] = None
+            registry.clear_active()
         running_ids = {e.project_id for e in processes.all()}
         return {
             "projects": [
@@ -587,12 +591,19 @@ def create_launcher(
                         "path": str(project_path),
                     }
 
-        # ``registry.add`` is now path-keyed and idempotent — same
-        # path returns the existing entry, duplicate display names
-        # are allowed (two projects in different directories are
-        # genuinely different projects).  The old name-conflict 409
-        # path is unreachable.
-        entry = registry.add(name, project_path)
+        # ``registry.add`` is path-keyed and idempotent — same path
+        # returns the existing entry, duplicate display names are
+        # allowed (two projects in different directories are
+        # genuinely different projects).  The name from the request
+        # body is supplied as a keyword so the auto-derived default
+        # doesn't shadow what the user actually typed.
+        try:
+            entry = registry.add(project_path, name=name)
+        except FileNotFoundError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Directory not found: {project_path}",
+            ) from e
 
         return {
             "status": "ok",
@@ -603,11 +614,23 @@ def create_launcher(
             "has_protocol": entry.has_protocol,
         }
 
-    @app.delete("/api/projects/{name}")
-    async def remove_project(name: str) -> dict[str, str]:
-        # Resolve via registry so we can stop the right subprocess
-        # and clear active state when there are duplicate names.
-        project = registry.get(name)
+    def _get_project_or_404(project_id: str) -> ProjectEntry:
+        """Look up a project by id; raise 404 if unknown.  Used by
+        every id-keyed route so the not-found response is uniform."""
+        project = registry.get(project_id)
+        if project is None:
+            raise HTTPException(
+                status_code=404, detail=f"Project not found: {project_id}",
+            )
+        return project
+
+    @app.delete("/api/projects/{project_id}")
+    async def remove_project(project_id: str) -> dict[str, str]:
+        # Idempotent: a 404 here means the caller's view was
+        # already stale (project disappeared between list and
+        # delete) — treat as success rather than surfacing an
+        # error the user has no way to act on.
+        project = registry.get(project_id)
         if project is not None:
             proc = processes.remove(project.id)
             if proc is not None:
@@ -615,13 +638,13 @@ def create_launcher(
             if active_project["id"] == project.id:
                 active_project["id"] = None
                 registry.clear_active()
-        registry.remove(name)
+            registry.remove(project.id)
         return {"status": "removed"}
 
     async def _do_activate(project: ProjectEntry) -> dict[str, Any]:
         """Activate a project: start its server and mark it active."""
         if not Path(project.path).is_dir():
-            registry.remove(project.name)
+            registry.remove(project.id)
             if active_project["id"] == project.id:
                 active_project["id"] = None
                 registry.clear_active()
@@ -631,7 +654,7 @@ def create_launcher(
             )
         entry = await _ensure_running(project)
         active_project["id"] = project.id
-        registry.touch(project.name)
+        registry.touch(project.id)
         registry.set_active(project.id)
 
         # Fetch session info from the project server
@@ -653,26 +676,17 @@ def create_launcher(
             "session": session_info,
         }
 
-    @app.post("/api/projects/{name}/activate")
-    async def activate_project(name: str) -> dict[str, Any]:
-        # Name-keyed activation is first-match across duplicates;
-        # frontends with a known id should prefer
-        # ``activate-by-id`` to disambiguate.
-        project = registry.get(name)
-        if project is None:
-            raise HTTPException(status_code=404, detail=f"Project not found: {name}")
-        return await _do_activate(project)
+    @app.post("/api/projects/{project_id}/activate")
+    async def activate_project(project_id: str) -> dict[str, Any]:
+        return await _do_activate(_get_project_or_404(project_id))
 
-    @app.post("/api/projects/activate-by-id/{project_id}")
-    async def activate_project_by_id(project_id: str) -> dict[str, Any]:
-        project = registry.get_by_id(project_id)
-        if project is None:
-            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
-        return await _do_activate(project)
-
-    @app.post("/api/projects/{name}/deactivate")
-    async def deactivate_project(name: str) -> dict[str, str]:
-        project = registry.get(name)
+    @app.post("/api/projects/{project_id}/deactivate")
+    async def deactivate_project(project_id: str) -> dict[str, str]:
+        # Idempotent: a 404 here would just confuse the caller.
+        # If the project's already gone we treat the deactivate as
+        # already-applied; if it's there we tear down its server
+        # and clear the active state.
+        project = registry.get(project_id)
         if project is not None:
             proc = processes.remove(project.id)
             if proc is not None:
@@ -687,7 +701,7 @@ def create_launcher(
         project_id = active_project["id"]
         if project_id is None:
             return {"active": False}
-        project = registry.get_by_id(project_id)
+        project = registry.get(project_id)
         entry = processes.get(project_id)
         return {
             "active": True,
@@ -756,7 +770,7 @@ def create_launcher(
                         # don't fall back to first-match.
                         project_id = active_project["id"]
                         proj = (
-                            registry.get_by_id(project_id)
+                            registry.get(project_id)
                             if project_id else None
                         )
                         if proj:
@@ -768,7 +782,7 @@ def create_launcher(
                         if new_sid and proj and proj.llm_session_id != new_sid:
                             try:
                                 registry.update(
-                                    proj.name, llm_session_id=new_sid,
+                                    proj.id, llm_session_id=new_sid,
                                 )
                             except Exception:
                                 pass  # don't break the proxy

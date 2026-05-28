@@ -270,26 +270,27 @@ export async function createProject(args: {
   throw new Error(`${res.status}: ${errorBody}`);
 }
 
-export const removeProject = (name: string) =>
-  fetchJson<{ status: string }>(`/api/projects/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-  });
-
-export const activateProject = (name: string) =>
-  fetchJson<{ id: string; name: string; path: string; port: number; session: SessionInfo }>(
-    `/api/projects/${encodeURIComponent(name)}/activate`,
-    { method: "POST" },
-  );
-
-export const activateProjectById = (id: string) =>
-  fetchJson<{ id: string; name: string; path: string; port: number; session: SessionInfo }>(
-    `/api/projects/activate-by-id/${encodeURIComponent(id)}`,
-    { method: "POST" },
-  );
-
-export const deactivateProject = (name: string) =>
+// Project lifecycle routes are all id-keyed.  Display names aren't
+// unique (the registry deliberately allows two projects with the
+// same label in different directories), so routing by name would
+// produce ambiguous outcomes; the launcher dropped its name-keyed
+// routes when the registry switched to path-as-identity.  Always
+// pass the ``id`` from the project list / create-project response.
+export const removeProject = (projectId: string) =>
   fetchJson<{ status: string }>(
-    `/api/projects/${encodeURIComponent(name)}/deactivate`,
+    `/api/projects/${encodeURIComponent(projectId)}`,
+    { method: "DELETE" },
+  );
+
+export const activateProject = (projectId: string) =>
+  fetchJson<{ id: string; name: string; path: string; port: number; session: SessionInfo }>(
+    `/api/projects/${encodeURIComponent(projectId)}/activate`,
+    { method: "POST" },
+  );
+
+export const deactivateProject = (projectId: string) =>
+  fetchJson<{ status: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/deactivate`,
     { method: "POST" },
   );
 

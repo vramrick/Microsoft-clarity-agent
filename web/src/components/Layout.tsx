@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
-import { activateProjectById, createProject, getProjects, removeProject, getSession, getSettings, getSetupStatus } from "../api/client";
+import { activateProject, createProject, getProjects, removeProject, getSession, getSettings, getSetupStatus } from "../api/client";
 import { ChatProvider } from "../hooks/useChat";
 import type { SessionInfo } from "../types";
 import FeedbackDialog from "./FeedbackDialog";
@@ -79,7 +79,7 @@ export default function Layout() {
     }
     activatingRef.current = projectId;
     setSessionLoading(true);
-    activateProjectById(projectId)
+    activateProject(projectId)
       .then(() => fetchSession())
       .catch((err: unknown) => {
         // The launcher returns 410 when a project's directory no longer
@@ -130,7 +130,7 @@ export default function Layout() {
           // collide across projects, and name-keyed activation
           // would first-match the wrong one.  Id is the stable
           // path-derived hash.
-          await activateProjectById(result.entry.id);
+          await activateProject(result.entry.id);
           id = result.entry.id;
         } else {
           // The directory needs a setup decision (needs_setup,
@@ -175,7 +175,7 @@ export default function Layout() {
     const onActivate = async (e: Event) => {
       const projectId = (e as CustomEvent).detail;
       try {
-        await activateProjectById(projectId);
+        await activateProject(projectId);
         await refreshRecentMenu();
         navigate(`/p/${projectId}/`);
       } catch (err) {
@@ -194,7 +194,7 @@ export default function Layout() {
       try {
         const data = await getProjects();
         for (const p of data.projects) {
-          await removeProject(p.name);
+          await removeProject(p.id);
         }
         await refreshRecentMenu();
       } catch {

@@ -411,3 +411,74 @@ class TestAlreadyRegistered:
         assert second.json()["name"] == "new-name"
         # Same path means same id — it's the same project entry.
         assert second.json()["id"] == first.json()["id"]
+
+
+# ---------------------------------------------------------------------------
+# Id-keyed routes: 404 on unknown id; idempotent delete/deactivate
+# ---------------------------------------------------------------------------
+
+
+class TestIdKeyedRoutes:
+    """All routes that take a project identifier in the URL use the
+    stable id (path-derived hash), never the display name.  These
+    tests pin down both the 404 contract for activate (where the
+    caller really does need to know the project exists) and the
+    idempotent succeed-on-missing contract for delete/deactivate
+    (where surfacing a 404 would just race with stale UI views)."""
+
+    def test_activate_404_when_unknown_id(
+        self, client: TestClient,
+    ) -> None:
+        # The activate route needs to look the project up to spawn
+        # its server — there's no sensible "proceed anyway" when
+        # the id doesn't exist, so 404 is the right answer.
+        r = client.post("/api/projects/bogus-id-123/activate")
+        assert r.status_code == 404
+        assert "not found" in r.json()["detail"].lower()
+
+    def test_delete_unknown_id_is_idempotent(
+        self, client: TestClient,
+    ) -> None:
+        # The frontend issues DELETE during cleanup paths (e.g.
+        # confirming removal of a project the user picked from the
+        # list).  By the time the request lands the user's view
+        # may already be stale — a 404 here would force the
+        # frontend to special-case "the project went away while I
+        # was deleting it", which is the same outcome as success.
+        # Always 200; remove() is silent on unknown ids by design.
+        r = client.delete("/api/projects/bogus-id-123")
+        assert r.status_code == 200
+        assert r.json()["status"] == "removed"
+
+    def test_deactivate_unknown_id_is_idempotent(
+        self, client: TestClient,
+    ) -> None:
+        # Same logic as delete — deactivate is fundamentally a
+        # "ensure not running" operation; an unknown id is
+        # trivially "already not running."
+        r = client.post("/api/projects/bogus-id-123/deactivate")
+        assert r.status_code == 200
+        assert r.json()["status"] == "deactivated"
+
+    def test_delete_actual_id_works(
+        self, client: TestClient, tmp_path: Path,
+    ) -> None:
+        # Round-trip: create → delete by id → confirm it's gone.
+        # Pins down that the id from the create response is what
+        # the DELETE route expects.
+        project = tmp_path / "doomed"
+        project.mkdir()
+        (project / PROTOCOL_DIR_VISIBLE).mkdir()
+
+        created = client.post("/api/projects", json={
+            "name": "doomed", "path": str(project),
+            "intent": "open_existing",
+        })
+        assert created.status_code == 200
+        project_id = created.json()["id"]
+
+        r = client.delete(f"/api/projects/{project_id}")
+        assert r.status_code == 200
+
+        listed = client.get("/api/projects").json()["projects"]
+        assert project_id not in {p["id"] for p in listed}
