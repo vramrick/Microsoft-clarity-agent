@@ -1,24 +1,28 @@
-"""Check for and apply clarity-agent updates.
+"""Check for and apply clarity-agent updates — the git-checkout side.
 
-In development (git checkout): compares local HEAD against origin/main,
-and orchestrates git pull + pip install + web rebuild when updating.
+In development (git checkout): compares local HEAD against
+``origin/<current-branch>``, and orchestrates git pull + pip
+install + web rebuild when updating.
 
-In frozen (PyInstaller) builds: queries the GitHub Releases API to check
-for a newer version, and provides a download URL.
+Release-mode updates live in
+:mod:`~clarity_agent.setup.release_feed` and are dispatched to by
+:func:`~clarity_agent.setup.version.current_state` based on
+:attr:`~clarity_agent.setup.types.VersionInfo.source`.  This module
+deliberately does *not* know about release-URL synthesis — that's
+the :class:`~clarity_agent.setup.release_feed.ReleaseFeed`
+producer's job (it owns the URL scheme of whatever it talks to),
+and the URL rides along on :attr:`ReleaseInfo.release_url`.
 
 **Stdlib-only** — same constraint as installer.py: no third-party imports.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 import threading
-import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 from clarity_agent.setup.installer import (
@@ -29,24 +33,27 @@ from clarity_agent.setup.installer import (
 )
 from clarity_agent.setup.layout import EMBEDDED_AGENT_SUBDIR
 
-# GitHub repo for release checks.
-_GITHUB_REPO = "microsoft/clarity-agent"
+# Data shapes live in :mod:`setup.types`.  This module is the
+# producer of ``UpdateStatus`` and ``GitUpdate`` — re-exported here
+# so callers still doing ``from setup.updater import GitUpdate``
+# keep working.  Callers are encouraged to consume them through
+# ``setup.version.current_state`` rather than constructing them
+# directly.
+from clarity_agent.setup.types import GitUpdate, UpdateStatus
 
-
-@dataclass
-class UpdateStatus:
-    """Result of checking for available updates."""
-
-    available: bool
-    local_sha: str
-    remote_sha: str | None
-    commit_count: int  # number of commits behind origin/main
-    # Fields used only in frozen mode:
-    frozen: bool = False
-    current_version: str | None = None
-    latest_version: str | None = None
-    download_url: str | None = None
-
+# Re-exported via __all__ so static analyzers see them as part of
+# this module's public surface (otherwise they look unused-here).
+__all__ = [
+    "GitUpdate",
+    "Outcome",
+    "StepResult",
+    "UpdateStatus",
+    "build_web_frontend",
+    "check_for_updates",
+    "install_python_deps",
+    "run_update",
+    "schedule_restart",
+]
 
 def _git_head(cwd: Path) -> str:
     """Return the current HEAD commit SHA."""
@@ -74,54 +81,55 @@ def _git_fetch(cwd: Path, *, timeout: int = 30) -> None:
     )
 
 
-def _parse_version(tag: str) -> tuple[int, ...]:
-    """Parse a version tag like 'v1.2.3' into a comparable tuple."""
-    return tuple(int(x) for x in tag.lstrip("v").split(".") if x.isdigit())
+def _frozen_local_status() -> UpdateStatus:
+    """Silent ``UpdateStatus`` for the locally-built frozen binary
+    edge case.
 
+    The only path that reaches here is a PyInstaller binary whose
+    ``_version.py`` wasn't stamped by release CI (so ``source ==
+    "local"``).  That binary has no upstream we can update against
+    — the GitHub release feed is for stamped releases, the git
+    layer needs a checkout — so the right answer is "stay silent."
+    ``remote_sha=None`` signals "couldn't determine" upstream;
+    :func:`~clarity_agent.setup.version._local_update_state`
+    translates that into ``update_status="unknown"`` so the badge
+    doesn't render.
 
-def _check_github_release() -> UpdateStatus:
-    """Check GitHub Releases for a newer version (used in frozen builds)."""
-
-    # Read current version from pyproject.toml metadata or package
-    try:
-        from importlib.metadata import version as pkg_version
-        current = pkg_version("clarity-agent")
-    except Exception:
-        current = "0.0.0"
-
-    url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
-    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-    except Exception:
-        return UpdateStatus(
-            available=False, local_sha=current, remote_sha=None,
-            commit_count=0, frozen=True, current_version=current,
-        )
-
-    latest_tag = data.get("tag_name", "")
-    html_url = data.get("html_url", "")
-
-    if _parse_version(latest_tag) > _parse_version(current):
-        return UpdateStatus(
-            available=True, local_sha=current, remote_sha=latest_tag,
-            commit_count=0, frozen=True,
-            current_version=current, latest_version=latest_tag.lstrip("v"),
-            download_url=html_url,
-        )
-
+    Genuine release binaries never reach this function:
+    :func:`~clarity_agent.setup.version.current_state` dispatches
+    them straight to the release-feed path based on
+    ``VersionInfo.source``, so the URL the user might download is
+    carried by :attr:`~clarity_agent.setup.types.ReleaseInfo.release_url`
+    — owned by the :class:`~clarity_agent.setup.release_feed.ReleaseFeed`
+    that produced it, not synthesized here.
+    """
     return UpdateStatus(
-        available=False, local_sha=current, remote_sha=latest_tag,
-        commit_count=0, frozen=True,
-        current_version=current, latest_version=latest_tag.lstrip("v"),
+        available=False, local_sha="", remote_sha=None, commit_count=0,
     )
 
 
 def _check_git_updates(agent_dir: Path) -> UpdateStatus:
-    """Check git origin/main for newer commits (used in dev checkouts)."""
+    """Check the current branch's upstream for newer commits.
+
+    Tracks ``origin/<current-branch>`` rather than always
+    ``origin/main`` — a contributor working on ``issue48-1`` wants
+    to know about updates on that branch, not on main.  When the
+    current branch has no remote counterpart (``rev-parse`` fails),
+    we return ``available=False`` with ``remote_sha=None``; the
+    endpoint surfaces this as ``update_status="unknown"`` with a
+    reason so the UI stays silent rather than guessing.
+
+    Detached HEAD is treated the same as "no upstream" — we don't
+    have a sensible branch to compare against.
+    """
     local_sha = _git_head(agent_dir)
+    branch = _git_current_branch(agent_dir)
+
+    if branch is None or branch == "HEAD":
+        # Detached HEAD — nothing to compare against.
+        return UpdateStatus(
+            available=False, local_sha=local_sha, remote_sha=None, commit_count=0,
+        )
 
     try:
         _git_fetch(agent_dir)
@@ -130,11 +138,16 @@ def _check_git_updates(agent_dir: Path) -> UpdateStatus:
             available=False, local_sha=local_sha, remote_sha=None, commit_count=0,
         )
 
+    upstream = f"origin/{branch}"
     try:
         remote_sha = subprocess.check_output(
-            ["git", "rev-parse", "origin/main"], cwd=agent_dir, text=True, timeout=10,
+            ["git", "rev-parse", upstream], cwd=agent_dir, text=True, timeout=10,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        # Branch exists locally but isn't pushed (or its upstream
+        # has a different name).  Endpoint surfaces this as
+        # ``unknown`` — the badge stays silent.
         return UpdateStatus(
             available=False, local_sha=local_sha, remote_sha=None, commit_count=0,
         )
@@ -146,12 +159,22 @@ def _check_git_updates(agent_dir: Path) -> UpdateStatus:
 
     try:
         count_str = subprocess.check_output(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            ["git", "rev-list", "--count", f"HEAD..{upstream}"],
             cwd=agent_dir, text=True, timeout=10,
         ).strip()
         commit_count = int(count_str)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
         commit_count = 0
+
+    # ``commit_count == 0`` means HEAD has diverged from origin
+    # (local has commits the remote doesn't, but the remote has none
+    # we don't).  Per the v1 design we surface a badge only when
+    # there are upstream commits to pull, so collapse this case to
+    # "not available."
+    if commit_count == 0:
+        return UpdateStatus(
+            available=False, local_sha=local_sha, remote_sha=remote_sha, commit_count=0,
+        )
 
     return UpdateStatus(
         available=True,
@@ -162,15 +185,21 @@ def _check_git_updates(agent_dir: Path) -> UpdateStatus:
 
 
 def check_for_updates(agent_dir: Path) -> UpdateStatus:
-    """Check whether a newer version is available.
+    """Check whether a newer version is available against the
+    current branch's upstream.
 
-    In frozen (PyInstaller) builds, queries the GitHub Releases API.
-    In development, uses git fetch + rev-parse against origin/main.
+    Only invoked for source-checkout builds — release-mode lookups
+    flow through the release feed via
+    :func:`~clarity_agent.setup.version.current_state` directly.
+    The locally-built frozen-binary edge case (PyInstaller binary
+    whose ``_version.py`` wasn't stamped) has no upstream to check
+    and returns a silent ``UpdateStatus`` via
+    :func:`_frozen_local_status`.
     """
     from clarity_agent.app_paths import is_frozen
 
     if is_frozen():
-        return _check_github_release()
+        return _frozen_local_status()
     return _check_git_updates(agent_dir)
 
 
@@ -225,18 +254,16 @@ def run_update(
             on_step(result)
 
     # -- Branch check ----------------------------------------------------
+    # We update whichever branch the checkout is currently on,
+    # pulling from ``origin/<branch>``.  The detached-HEAD case is
+    # still a hard error because there's no sensible upstream to
+    # pull from.  Diverged-local-commits is caught downstream by
+    # ``git pull --ff-only`` refusing to fast-forward.
     branch = _git_current_branch(agent_dir)
-    if branch is None:
+    if branch is None or branch == "HEAD":
         _record(StepResult(
             Outcome.FAIL,
             "Detached HEAD state — cannot update. Check out a branch first.",
-        ))
-        return results
-    if branch != "main":
-        _record(StepResult(
-            Outcome.FAIL,
-            f"On branch '{branch}', not 'main'. "
-            "Switch to main before updating to avoid overwriting your work.",
         ))
         return results
 

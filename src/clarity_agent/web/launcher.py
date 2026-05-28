@@ -395,6 +395,26 @@ def create_launcher(
             return None
 
     # ------------------------------------------------------------------
+    # REST: Version + update status (handled by the launcher, not
+    # proxied — the version is a property of *this* process, the
+    # same one the user sees in the menu/badge.  See
+    # ``clarity_agent.web.version_endpoint`` for the cache details.
+    # The per-project app also serves the same endpoint so
+    # single-project mode works without the launcher.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/version")
+    async def version_info() -> dict[str, Any]:
+        # ``clarity_agent_dir`` is needed for the local-mode git
+        # check; release builds ignore it.  Hopped onto a worker
+        # thread because the git fetch can run for a couple of
+        # seconds.  Caching + JSON shaping live in
+        # :mod:`~clarity_agent.setup.version`.
+        from clarity_agent.setup.version import current_state
+        state = await asyncio.to_thread(current_state, clarity_agent_dir)
+        return state.to_dict()
+
+    # ------------------------------------------------------------------
     # REST: Project management
     # ------------------------------------------------------------------
 
@@ -650,33 +670,11 @@ def create_launcher(
         }
 
     # ------------------------------------------------------------------
-    # REST: Update (handled by launcher, not proxied)
+    # REST: Update apply (handled by launcher, not proxied).  The
+    # *check* now lives on ``/api/version`` — both release-mode and
+    # git-mode payloads come back through that single endpoint;
+    # UpdateBadge dispatches on ``latest.kind``.
     # ------------------------------------------------------------------
-
-    @app.get("/api/update-check")
-    async def update_check() -> dict[str, Any]:
-        from clarity_agent.setup.updater import check_for_updates
-        try:
-            status = await asyncio.to_thread(check_for_updates, clarity_agent_dir)
-        except Exception:
-            return {
-                "update_available": False,
-                "current_sha": None,
-                "remote_sha": None,
-                "commit_count": 0,
-                "frozen": False,
-            }
-        return {
-            "update_available": status.available,
-            "current_sha": status.local_sha[:8] if not status.frozen else status.current_version,
-            "remote_sha": (status.remote_sha[:8] if status.remote_sha and not status.frozen
-                           else status.latest_version),
-            "commit_count": status.commit_count,
-            "frozen": status.frozen,
-            "current_version": status.current_version,
-            "latest_version": status.latest_version,
-            "download_url": status.download_url,
-        }
 
     @app.post("/api/update/run")
     async def run_update_endpoint() -> dict[str, Any]:

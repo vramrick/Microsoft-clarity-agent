@@ -15,7 +15,6 @@ import type {
   SetupStatus,
   PacketStatusData,
   TranscriptEntry,
-  UpdateCheckInfo,
   UpdateRunResult,
 } from "../types";
 
@@ -69,6 +68,53 @@ export async function generatePacket(
 // Session
 export const getSession = () => fetchJson<SessionInfo>("/api/session");
 
+/**
+ * The running binary's version + cached update-check result.
+ *
+ * Mirrors the dict shape returned by
+ * ``clarity_agent.web.version_endpoint.get_version_payload``.  Kept
+ * in sync with that module — every field below has a counterpart
+ * there.  ``version`` is a release tag (e.g. ``"v1.2.3"``) or the
+ * literal ``"local"``.
+ *
+ * ``latest`` is a discriminated union: ``kind: "release"`` for
+ * release-binary builds (links to the GitHub release page), or
+ * ``kind: "git"`` for source-checkout builds (a "5 commits behind
+ * <branch>" badge).  Frontends should ``switch (latest.kind)``
+ * rather than re-derive the mode from ``source``.
+ */
+export interface ReleaseLatest {
+  kind: "release";
+  version: string;
+  assets: Record<string, string>;
+  release_url: string;
+}
+
+export interface GitLatest {
+  kind: "git";
+  branch: string;
+  commit_count: number;
+  remote_sha: string;
+}
+
+export interface VersionPayload {
+  version: string;
+  source: "release" | "local";
+  is_release: boolean;
+  // Local-mode introspection — populated only when source === "local".
+  // Used by the sidebar's version label to render "<branch> @ <sha>"
+  // instead of the generic "local" string.  Either field may be null
+  // even in local mode if the git lookup failed (no .git/, no git
+  // binary, detached HEAD) — the UI falls back to "local" then.
+  branch: string | null;
+  local_sha: string | null;
+  update_status: "available" | "up_to_date" | "unknown";
+  latest: ReleaseLatest | GitLatest | null;
+  reason: string | null;
+}
+
+export const getVersion = () => fetchJson<VersionPayload>("/api/version");
+
 // Conversation thread
 /**
  * Roll the current project's conversation thread over to a new chapter.
@@ -88,9 +134,9 @@ export const startNewChapter = () =>
 export const getCurrentChapter = () =>
   fetchJson<{ messages: ChatMessage[] }>("/api/thread/current-chapter");
 
-// Update check
-export const checkForUpdate = () => fetchJson<UpdateCheckInfo>("/api/update-check");
-
+// Update apply.  The *check* shape lives on ``getVersion()`` —
+// ``/api/version`` returns ``update_status`` + a discriminated
+// ``latest`` (release vs. git) that UpdateBadge dispatches on.
 export const runUpdate = () =>
   fetchJson<UpdateRunResult>("/api/update/run", { method: "POST" });
 
